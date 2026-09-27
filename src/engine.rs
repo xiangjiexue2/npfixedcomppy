@@ -391,11 +391,21 @@ impl MixSolver {
         let mut dens = self.fam.mapping(&mu0, &pi0);
         let mut closs = self.fam.lossfunction(&dens);
         let mut nloss = f64::NAN;
+        // env-gated phase profiler (NPFIXEDCOMPY_PROFILE=1)
+        let prof = std::env::var("NPFIXEDCOMPY_PROFILE").is_ok();
+        let mut pt_map = 0.0f64;
+        let mut pt_loss = 0.0f64;
+        let mut pt_grad = 0.0f64;
+        let mut pt_wt = 0.0f64;
+        let mut pt_col = 0.0f64;
+        let mut t_iter_start = std::time::Instant::now();
         loop {
+            let t0 = std::time::Instant::now();
             let newpoints = self.solvegrad(&dens, tol);
             mu0.extend(newpoints.clone());
             pi0.extend(std::iter::repeat(0.0).take(newpoints.len()));
             sortmix(&mut mu0, &mut pi0);
+            pt_grad += t0.elapsed().as_secs_f64();
 
             if self.verbose >= 1 {
                 eprintln!("Iteration: {} with loss {}", self.iter, nloss);
@@ -413,7 +423,9 @@ impl MixSolver {
                 eprintln!("loss:{}", self.fam.lossfunction(&d2));
             }
 
+            let t0 = std::time::Instant::now();
             self.fam.computeweights(&mu0, &mut pi0, &dens);
+            pt_wt += t0.elapsed().as_secs_f64();
             if self.verbose >= 2 {
                 eprintln!("After computeweights");
                 eprintln!("support points: {:?}", mu0);
@@ -421,7 +433,9 @@ impl MixSolver {
                 let d2 = self.fam.mapping(&mu0, &pi0);
                 eprintln!("loss:{}", self.fam.lossfunction(&d2));
             }
+            let t0 = std::time::Instant::now();
             self.collapse(&mut mu0, &mut pi0);
+            pt_col += t0.elapsed().as_secs_f64();
             if self.verbose >= 2 {
                 eprintln!("After collapse");
                 eprintln!("support points: {:?}", mu0);
@@ -430,8 +444,12 @@ impl MixSolver {
                 eprintln!("loss:{}", self.fam.lossfunction(&d2));
             }
             self.iter += 1;
+            let t0 = std::time::Instant::now();
             dens = self.fam.mapping(&mu0, &pi0);
+            pt_map += t0.elapsed().as_secs_f64();
+            let t0 = std::time::Instant::now();
             nloss = self.fam.lossfunction(&dens);
+            pt_loss += t0.elapsed().as_secs_f64();
 
             if closs - nloss < tol {
                 self.convergence = 0;
@@ -442,6 +460,19 @@ impl MixSolver {
                 break;
             }
             closs = nloss;
+        }
+        if prof {
+            let tot = t_iter_start.elapsed().as_secs_f64();
+            eprintln!(
+                "PROFILE iters={} total={:.1}ms  solvegrad={:.1}  mapping={:.1}  loss={:.1}  weights={:.1}  collapse={:.1} (ms)",
+                self.iter,
+                tot * 1e3,
+                pt_grad * 1e3,
+                pt_map * 1e3,
+                pt_loss * 1e3,
+                pt_wt * 1e3,
+                pt_col * 1e3
+            );
         }
         self.resultpt = mu0;
         self.resultpr = pi0;

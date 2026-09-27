@@ -335,6 +335,13 @@ pub struct NpNormLL {
     mu0fixed: Vec<f64>,
     pi0fixed: Vec<f64>,
     precompute: Vec<f64>,
+    /// Cached grid (the sorted support-point candidates) and the precomputed
+    /// data×grid kernel matrix, stored COLUMN-MAJOR: `kmat[j*n + i] =
+    /// dnormv(data[i], kgrid[j], beta)`. Column `j` is therefore the
+    /// contiguous slice `kmat[j*n .. (j+1)*n]`, which the gradient sweep
+    /// reads directly. Built once in `prepare`; empty until then.
+    kgrid: Vec<f64>,
+    kmat: Vec<f64>,
 }
 
 impl NpNormLL {
@@ -348,12 +355,45 @@ impl NpNormLL {
             mu0fixed,
             pi0fixed,
             precompute,
+            kgrid: Vec::new(),
+            kmat: Vec::new(),
         }
     }
 
 }
 
 impl Family for NpNormLL {
+    fn prepare(&mut self, grid: &[f64]) {
+        if grid.is_empty() {
+            self.kgrid.clear();
+            self.kmat.clear();
+            return;
+        }
+        self.kgrid = grid.to_vec();
+        let g = grid.len();
+        let n = self.len;
+        // Column-major: column j is contiguous, so the per-iteration sweep is
+        // a cache-friendly sequential read. Parallel over columns (each chunk
+        // is one contiguous column; elements are independent).
+        let mut raw = vec![0.0f64; n * g];
+        if n >= par_n() {
+            raw.par_chunks_mut(n).enumerate().for_each(|(j, col)| {
+                let mj = grid[j];
+                for i in 0..n {
+                    col[i] = dnormv(self.data[i], mj, self.beta);
+                }
+            });
+        } else {
+            for i in 0..n {
+                let xi = self.data[i];
+                for j in 0..g {
+                    raw[j * n + i] = dnormv(xi, grid[j], self.beta);
+                }
+            }
+        }
+        self.kmat = raw;
+    }
+
     fn precompute(&self) -> &[f64] {
         &self.precompute
     }
@@ -404,6 +444,42 @@ impl Family for NpNormLL {
             let fl = 1.0 / (dens[i] + self.precompute[i]);
             fullden[i] = fl;
             dens_dot_fullden += dens[i] * fl;
+        }
+        // The full-grid sweep (`mu` == the cached grid) reads the
+        // precomputed data×grid kernel columns; anything else (interior
+        // solver points) falls back to direct `dnormv`. Reading column `j`
+        // accumulates `dnormv(data[i], kgrid[j], beta) * fullden[i]` over
+        // `i` in the same order as the uncached per-point loop below, so the
+        // cached result is bit-identical.
+        let g = self.kgrid.len();
+        let cached = g == m
+            && self.kmat.len() == n * g
+            && mu
+                .iter()
+                .zip(self.kgrid.iter())
+                .all(|(&a, &b)| a.is_finite() && a == b);
+        if cached {
+            for j in 0..m {
+                let col = &self.kmat[j * n..(j + 1) * n];
+                let mut s0 = 0.0f64;
+                let mut s1 = 0.0f64;
+                for i in 0..n {
+                    let d = col[i] * fullden[i];
+                    if d0 {
+                        s0 += d;
+                    }
+                    if d1 {
+                        s1 += (self.kgrid[j] - self.data[i]) * d;
+                    }
+                }
+                if d0 {
+                    a0[j] = dens_dot_fullden - s0 * scale;
+                }
+                if d1 {
+                    a1[j] = s1 * scale / self.beta / self.beta;
+                }
+            }
+            return (a0, a1);
         }
         // One pass over the data for large n (the previous per-point version
         // launched one rayon reduction per grid point); a tight per-point
