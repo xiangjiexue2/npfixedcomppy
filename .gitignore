@@ -1,0 +1,43 @@
+# --- Rust / cargo build artifacts ---
+/target/
+
+# --- Python packaging & native extension outputs ---
+build/
+dist/
+*.egg-info/
+.eggs/
+# PyO3 extension modules dropped into the source tree by `maturin develop`
+python/npfixedcomppy/_core*.pyd
+python/npfixedcomppy/_core*.so
+python/npfixedcomppy/_core*.dylib
+
+# --- Environments ---
+.venv*/
+venv/
+env/
+
+# --- Caches ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.maturin/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Scratch / diagnostic files from development runs ---
+*.out
+*.log
+build_err*.txt
+build_out*.txt
+pretty_check.*
+tests/dbg_*.py
+*.exe
+*.pdb
+*.dll

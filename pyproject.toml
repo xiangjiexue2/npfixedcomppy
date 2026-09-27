@@ -1,0 +1,31 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "npfixedcomppy"
+version = "0.1.0"
+description = "Non-parametric estimation of mixing distributions with fixed components (Rust + Python port of the R package npfixedcomp2)"
+authors = [{ name = "Xiangjie Xue (original R package)", email = "" }]
+readme = "README.md"
+license = { text = "GPL-3" }
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.24"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "npfixedcomppy._core"
+python-source = "python"
+manifest-path = "Cargo.toml"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
