@@ -5,10 +5,13 @@ non-parametric maximum-likelihood (and distance-based) estimation of
 mixing distributions with optional fixed components, plus estimation of
 the point-mass proportion at zero (``estpi0``).
 
-All heavy computation runs in a bundled Rust extension
-(``npfixedcomppy._core``); the Python layer is a thin, R-compatible
-front-end. Results are designed to match the R package to working
-precision for the families below.
+All heavy computation runs in a bundled C++/Eigen extension
+(``npfixedcomppy._core``, built with pybind11); the Python layer is a
+thin, R-compatible front-end. Results are designed to match the R
+package to working precision for the families below. The solver is
+fully serial and deterministic (SIMD width is decided at build time;
+there is no OpenMP), so identical inputs always produce bit-identical
+outputs.
 
 Public API
 ----------

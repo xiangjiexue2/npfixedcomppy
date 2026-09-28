@@ -19,12 +19,16 @@ the big case.  So for those cases we assert the deterministic invariant
 distance for information only.  For the deterministic cases (CM, fixed) we
 assert strict density + ll agreement with R.
 """
+import os
+
 import numpy as np
 
 from npfixedcomppy import computemixdist, estpi0
 
-data1000 = np.loadtxt("C:/Users/xxjie/Documents/rebuild/npfc_data_1000.csv", delimiter=",", skiprows=1, ndmin=1)
-data5000 = np.loadtxt("C:/Users/xxjie/Documents/rebuild/npfc_data_5000.csv", delimiter=",", skiprows=1, ndmin=1)
+DATA_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+data1000 = np.loadtxt(os.path.join(DATA_ROOT, "npfc_data_1000.csv"), delimiter=",", skiprows=1, ndmin=1)
+data5000 = np.loadtxt(os.path.join(DATA_ROOT, "npfc_data_5000.csv"), delimiter=",", skiprows=1, ndmin=1)
 
 VAL_EP = 2.0  # the estpi0 threshold used when generating the reference
 
@@ -52,13 +56,13 @@ def maxrel(a, b):
 
 
 # --- load references ---
-dref = np.loadtxt("C:/Users/xxjie/Documents/rebuild/npfc_density_ref.csv", delimiter=",", skiprows=1)
+dref = np.loadtxt(os.path.join(DATA_ROOT, "npfc_density_ref.csv"), delimiter=",", skiprows=1)
 x, d_cm_r, d_ep_r, d_f_r = dref[:, 0], dref[:, 1], dref[:, 2], dref[:, 3]
-bref = np.loadtxt("C:/Users/xxjie/Documents/rebuild/npfc_density_ref_big.csv", delimiter=",", skiprows=1)
+bref = np.loadtxt(os.path.join(DATA_ROOT, "npfc_density_ref_big.csv"), delimiter=",", skiprows=1)
 xb, d_big_r = bref[:, 0], bref[:, 1]
 
 sref = {}
-with open("C:/Users/xxjie/Documents/rebuild/npfc_scalar_ref.csv", encoding="utf-8") as f:
+with open(os.path.join(DATA_ROOT, "npfc_scalar_ref.csv"), encoding="utf-8") as f:
     f.readline()  # header
     for line in f:
         parts = line.strip().split("\t")

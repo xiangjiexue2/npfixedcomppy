@@ -11,6 +11,7 @@
 //!   class; non-central t kernel, flag `d0`).
 
 use crate::nnls::{pnnlssum, pnnqp};
+use crate::npfc_ffi;
 use crate::stats::{dnorm, dnt, gammln, pnorm, LN_SQRT_2PI};
 use nalgebra::{DMatrix, DVector};
 use rayon::prelude::*;
@@ -257,8 +258,14 @@ fn dnpnorm(data: &[f64], mu0: &[f64], pi0: &[f64], beta: f64) -> Vec<f64> {
     if mu0.is_empty() {
         return vec![0.0; n];
     }
-    let m = mu0.len();
     let mut out = vec![0.0f64; n];
+    // Heavy path: C++/Eigen core (SIMD at build time, OpenMP when present).
+    // The scalar block below is only a safety fallback so a rejected FFI
+    // call can never yield a zero-filled density.
+    if npfc_ffi::mapping_norm(data, mu0, pi0, beta, &mut out) {
+        return out;
+    }
+    let m = mu0.len();
     if m == 1 {
         let (mu, pj) = (mu0[0], pi0[0]);
         if n >= par_n() {
@@ -373,21 +380,25 @@ impl Family for NpNormLL {
         let g = grid.len();
         let n = self.len;
         // Column-major: column j is contiguous, so the per-iteration sweep is
-        // a cache-friendly sequential read. Parallel over columns (each chunk
-        // is one contiguous column; elements are independent).
+        // a cache-friendly sequential read. The fill runs in the C++/Eigen
+        // core (SIMD + optional OpenMP); the scalar loop below is only a
+        // safety fallback if the FFI call is ever rejected.
         let mut raw = vec![0.0f64; n * g];
-        if n >= par_n() {
-            raw.par_chunks_mut(n).enumerate().for_each(|(j, col)| {
-                let mj = grid[j];
+        let ok = npfc_ffi::kmat_norm(&self.data, grid, self.beta, &mut raw);
+        if !ok {
+            if n >= par_n() {
+                raw.par_chunks_mut(n).enumerate().for_each(|(j, col)| {
+                    let mj = grid[j];
+                    for i in 0..n {
+                        col[i] = dnormv(self.data[i], mj, self.beta);
+                    }
+                });
+            } else {
                 for i in 0..n {
-                    col[i] = dnormv(self.data[i], mj, self.beta);
-                }
-            });
-        } else {
-            for i in 0..n {
-                let xi = self.data[i];
-                for j in 0..g {
-                    raw[j * n + i] = dnormv(xi, grid[j], self.beta);
+                    let xi = self.data[i];
+                    for j in 0..g {
+                        raw[j * n + i] = dnormv(xi, grid[j], self.beta);
+                    }
                 }
             }
         }

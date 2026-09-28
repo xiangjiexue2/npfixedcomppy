@@ -1,6 +1,6 @@
 # npfixedcomppy
 
-A Rust + Python reimplementation of the R package
+A Python reimplementation (C++/Eigen core) of the R package
 [`npfixedcomp2`](https://CRAN) for computing **non-parametric mixing
 distribution** estimates for several parametric families, with support for
 
@@ -10,10 +10,17 @@ distribution** estimates for several parametric families, with support for
 - multiple **loss functions** (maximum likelihood, Cramér–von Mises
   distance, Anderson–Darling distance).
 
-All numerically heavy work (initial mixing distribution, grid points,
-density / CDF / mapping / gradient evaluation, the constrained non-negative
-least-squares subproblem, and the support-point solvers) is implemented in
-Rust; the Python package is a thin, ergonomic front-end.
+**Compute architecture:** `Python → C++/Eigen` (a single pybind11
+extension, `npfixedcomppy._core`). The whole compute stack — engine,
+support-point solvers, constrained NNLS, gradient and weight sweeps,
+kernel-matrix fills, the mixture density — runs in C++/Eigen. The
+**SIMD width is decided by the compiler at build time** (`/arch:AVX2` on
+the build host, scalar fallback otherwise, same source) and the solver is
+**fully serial: there is no OpenMP and no thread pool** — identical
+inputs therefore always produce bit-identical outputs. A per-fit kernel
+column cache (each kernel column is computed once and reused by every
+consumer) is the main performance lever; details and measured evidence:
+[`docs/PERF.md`](docs/PERF.md).
 
 The algorithms follow Wang (2007) and the extensions in the `npfixedcomp2`
 R package. The un-binned families are currently supported:
@@ -32,17 +39,23 @@ ported yet**.
 
 ## 中文说明
 
-`npfixedcomppy` 是 R 包 [`npfixedcomp2`](https://CRAN) 的 **Rust + Python**
-重写版本，用于计算若干参数族的**非参数混合分布**估计，支持：
+`npfixedcomppy` 是 R 包 [`npfixedcomp2`](https://CRAN) 的 **Python
+（C++/Eigen 内核）**重写版本，用于计算若干参数族的**非参数混合分布**
+估计，支持：
 
 - 带**固定分量**的混合分布估计；
 - 同时估计**零处点质量比例**（`estpi0`）；
 - 多种**损失函数**（极大似然、Cramér–von Mises 距离、Anderson–Darling
   距离）。
 
-所有数值计算密集部分（初始混合分布、网格点、密度/CDF/mapping/梯度
-求值、约束非负最小二乘子问题、支撑点求解器）均用 Rust 实现；Python 包
-只是一个轻量、易用、与 R 接口兼容的前端。
+**计算架构：** `Python → C++/Eigen`（单一 pybind11 扩展
+`npfixedcomppy._core`）。整个计算栈——引擎、支撑点求解、约束非负最小
+二乘、梯度与权重扫描、核矩阵填充、混合密度——全部在 C++/Eigen 中
+完成。**SIMD 宽度由编译器在构建期决定**（构建主机上 `/arch:AVX2`，
+不支持时退化为标量，同一份源码）；求解器为**完全串行：无 OpenMP、无线
+程池**——因此相同输入恒产生逐位相同的输出。按拟合缓存内核列（每个内核
+列只计算一次、所有消费者复用）是主要的性能手段；细节与实测证据见
+[`docs/PERF.md`](docs/PERF.md)。
 
 算法遵循 Wang (2007) 及 `npfixedcomp2` 的扩展。目前已支持的
 （非分箱）族：
@@ -61,11 +74,14 @@ R 包中的分箱（"`...w`"、`order = -k`）变体**尚未移植**。
 ## Installation
 
 ```bash
-pip install -e .            # builds the Rust extension via maturin
+pip install -e .            # builds the C++/Eigen extension via setup.py + pybind11
 ```
 
-A recent Rust toolchain (stable) and a C compiler for the platform are
-required; `maturin` is pulled in by the build system.
+The C++/Eigen core is compiled by `setup.py` with the platform C++
+compiler (MSVC on Windows, GCC/Clang elsewhere) with `/O2 /arch:AVX2`
+(override the SIMD level with `NPFIC_ARCH`, e.g. `NPFIC_ARCH=` for plain
+x86-64), with Eigen vendored header-only under `eigen/`. `pybind11` is
+required at build time. The build has no OpenMP and no Rust dependency.
 
 ## Quick start
 
@@ -156,76 +172,93 @@ module docstrings for the full parameter reference.
 
 ## Performance
 
-All heavy work runs in Rust with a single `rayon` thread pool (parallel
-over observations `n` only, serial and **bit-identical** below
-`n = 2048`), and a per-fit **grid kernel cache** that turns each
-iteration's full-grid gradient sweep into a dot product. At `n = 5000`
-(single runs):
+The whole solver is serial C++/Eigen (SIMD decided at build time); the
+kernel column cache — each kernel column `K[:, mu]` computed once per fit
+and reused by the mapping, gradient, weight, and collapse passes — is the
+main speed-up. Typical wall time on this build (median of 3):
 
-| case | wall time |
-|------|-----------|
-| `computemixdist(x, method="npnormll")` | ≈ 43 ms |
-| `computemixdist(x, method="nptll", beta=inf)` | ≈ 82 ms |
-| `computemixdist(x, method="nptll", beta=5)` | ≈ 630 ms |
+| case | `npfixedcomppy` | R `npfixedcomp2` |
+|------|-----------------|------------------|
+| `computemixdist(x, method="npnormll")`, n=1000 | ≈ 8 ms | ≈ 15 ms |
+| `computemixdist(x, method="nptll", beta=inf)`, n=1000 | ≈ 36 ms | ≈ 212 ms |
+| `computemixdist(x, method="nptll", beta=5)`, n=5000 | ≈ 3.0 s | ≈ 50 s |
+| `computemixdist(x, method="npnormcll", beta=1000)`, n=1000 | ≈ 1.0 s | ≈ 2.0 s |
+| `computemixdist(x, method="npnormad")`, n=1000 | ≈ 37 ms | ≈ 38 ms |
+| `computemixdist(x, method="nppoisll")`, n=1000 | ≈ 0.6 ms | ≈ 5 ms |
 
 For the `t` family with small degrees of freedom the cost grows with `n`
 (super-linearly — the per-point `dnt` kernel has no cheap identity), so
 very large `n` is slow; the normal families scale linearly. See
-[`docs/PERF.md`](docs/PERF.md) for the full phase profile, the
-parallelism rules, and the evidence for why a SIMD GEMM library (`faer`)
-was *not* adopted.
+[`docs/PERF.md`](docs/PERF.md) for the phase profiles, the kernel column
+cache, and the comparison with R.
 
-Environment knobs: `NPFIXEDCOMPY_PAR_N` (serial threshold; set very high
-to force the fully-serial, bit-identical path), `RAYON_NUM_THREADS`
-(pool size).
+Environment knob: `NPFIXEDCOMPY_PROFILE=1` prints a per-phase timing
+line (solvegrad / mapping / loss / weights / collapse) to stderr.
 
 ### 性能
 
-重计算全部在 Rust 中完成，只使用一个 `rayon` 线程池（仅对观测数 `n`
-并行；`n < 2048` 时串行且**逐位一致**），并有按次拟合的**网格核缓存**：
-每次迭代的全网格梯度扫描退化为点积。`n = 5000` 单次运行实测：
+整个求解器为串行 C++/Eigen（SIMD 在构建期决定）；内核列缓存——每个内核
+列 `K[:, mu]` 每次拟合只计算一次，供 mapping、梯度、权重、collapse 各
+环节复用——是主要的加速手段。本构建典型耗时（3 次取中位数）：
 
-| 用例 | 耗时 |
-|------|------|
-| `computemixdist(x, method="npnormll")` | ≈ 43 ms |
-| `computemixdist(x, method="nptll", beta=inf)` | ≈ 82 ms |
-| `computemixdist(x, method="nptll", beta=5)` | ≈ 630 ms |
+| 用例 | `npfixedcomppy` | R `npfixedcomp2` |
+|------|-----------------|------------------|
+| `computemixdist(x, method="npnormll")`，n=1000 | ≈ 8 ms | ≈ 15 ms |
+| `computemixdist(x, method="nptll", beta=inf)`，n=1000 | ≈ 36 ms | ≈ 212 ms |
+| `computemixdist(x, method="nptll", beta=5)`，n=5000 | ≈ 3.0 s | ≈ 50 s |
+| `computemixdist(x, method="npnormcll", beta=1000)`，n=1000 | ≈ 1.0 s | ≈ 2.0 s |
+| `computemixdist(x, method="npnormad")`，n=1000 | ≈ 37 ms | ≈ 38 ms |
+| `computemixdist(x, method="nppoisll")`，n=1000 | ≈ 0.6 ms | ≈ 5 ms |
 
 t 族在小自由度下 `dnt` 核没有廉价恒等式，成本随 `n` 超线性增长，`n` 很大
-时较慢；正态族为线性。完整分阶段 profile、并行规则以及不采用 SIMD 矩阵
-库（`faer`）的实测依据见 [`docs/PERF.md`](docs/PERF.md)。
+时较慢；正态族为线性。分阶段 profile、内核列缓存及与 R 的对比见
+[`docs/PERF.md`](docs/PERF.md)。
 
-环境旋钮：`NPFIXEDCOMPY_PAR_N`（串行阈值；设很大可强制完全串行、逐位
-一致路径）、`RAYON_NUM_THREADS`（线程池大小）。
+环境旋钮：`NPFIXEDCOMPY_PROFILE=1` 向 stderr 输出分阶段计时
+（solvegrad / mapping / loss / weights / collapse）。
 
 ## Testing & parity with R
 
-- `python -m pytest` — unit tests.
-- `python tests\verify_npnormll.py` / `tests\verify_nptll.py` — parity
-  gates against recorded R `npfixedcomp2` references: bit-level **GOLD**
-  checks (ll/pt/pr, deterministic re-run) plus tolerance **BAND** checks
-  where R itself is run-to-run non-deterministic (its Eigen/OpenMP
-  reductions perturb the flat NPMLE surface).
+Run from `tests/` with the venv's Python (script-style, each exits
+non-zero on failure):
+
+- `python tests\verify_npnormll.py` — normal MLE: bit-level **GOLD**
+  checks (ll/pt/pr vs recorded R references, deterministic re-run) plus
+  tolerance **BAND** checks where R itself is run-to-run non-deterministic.
+- `python tests\verify_nptll.py` — t-family MLE (finite and infinite
+  degrees of freedom, fixed components, estpi0), bit-level.
+- `python tests\verify_cvmadcll.py` — Cramér–von Mises, Anderson–Darling
+  and correlation families incl. estpi0: GOLD for the deterministic R
+  cases (CLL), BAND where R is non-deterministic (CVM/AD).
+- `python tests\verify_pois.py` — Poisson MLE (CM + estpi0) on a shared
+  R-generated data file, bit-level.
 - `python tests\verify_density.py` — recomputed-density invariants
   (`ll == -sum log d(x_i | returned mixture)`) and estpi0 threshold
-  invariants.
-- `python ..\test_fast_estpi0.py` — `fast`/`relax` vs legacy refinement
-  bit-identical on all six families.
+  invariants, all six families.
+- `python tests\perf_baseline.py` — wall-time baseline of the public API.
 
-The package is **deterministic**: identical inputs always produce
-bit-identical outputs (unlike the R package on parallel platforms).
+All five parity suites must report `TOTAL BAD: 0`. The package is
+**deterministic**: identical inputs always produce bit-identical outputs
+(unlike the R package on parallel platforms).
 
 ### 测试与 R 包一致性
 
-- `python -m pytest` — 单元测试。
-- `python tests\verify_npnormll.py` / `tests\verify_nptll.py` — 针对
-  录制的 R `npfixedcomp2` 参考值的一致性门：逐位 **GOLD** 检查（ll/pt/pr、
-  确定性重跑）+ R 本身逐次非确定（Eigen/OpenMP 归约扰动平坦 NPMLE 面）
-  处的容差 **BAND** 检查。
-- `python tests\verify_density.py` — 重算密度不变量
-  （`ll == -sum log d(x_i | 返回的混合分布)`）与 estpi0 阈值不变量。
-- `python ..\test_fast_estpi0.py` — `fast`/`relax` 与 legacy 细化在全部
-  六个族上逐位一致。
+用 venv 的 Python 在 `tests/` 下运行（脚本式，失败时退出码非零）：
 
-本包是**确定性**的：相同输入恒产生逐位相同的输出（并行平台上的 R 包
-做不到这一点）。
+- `python tests\verify_npnormll.py` — 正态极大似然：逐位 **GOLD** 检查
+  （ll/pt/pr 对比录制的 R 参考、确定性重跑）+ R 本身逐次非确定处的
+  容差 **BAND** 检查。
+- `python tests\verify_nptll.py` — t 族极大似然（有限/无限自由度、固定
+  分量、estpi0），逐位。
+- `python tests\verify_cvmadcll.py` — Cramér–von Mises、Anderson–Darling
+  与相关族（含 estpi0）：R 确定（CLL）用 GOLD，R 非确定（CVM/AD）用
+  BAND。
+- `python tests\verify_pois.py` — 泊松极大似然（CM + estpi0），共读
+  R 生成的数据文件，逐位。
+- `python tests\verify_density.py` — 重算密度不变量
+  （`ll == -sum log d(x_i | 返回的混合分布)`）与 estpi0 阈值不变量，
+  全部六个族。
+- `python tests\perf_baseline.py` — 公开 API 的耗时基线。
+
+五个 parity 套件必须全部报告 `TOTAL BAD: 0`。本包是**确定性**的：相同
+输入恒产生逐位相同的输出（并行平台上的 R 包做不到这一点）。

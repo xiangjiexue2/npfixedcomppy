@@ -6,7 +6,7 @@ build/
 dist/
 *.egg-info/
 .eggs/
-# PyO3 extension modules dropped into the source tree by `maturin develop`
+# Extension modules dropped into the source tree by the in-place build
 python/npfixedcomppy/_core*.pyd
 python/npfixedcomppy/_core*.so
 python/npfixedcomppy/_core*.dylib
@@ -31,13 +31,38 @@ __pycache__/
 Thumbs.db
 desktop.ini
 
-# --- Scratch / diagnostic files from development runs ---
-*.out
-*.log
-build_err*.txt
-build_out*.txt
-pretty_check.*
+# --- Eigen scratch: keep only the vendored include tree `eigen/` ---
+/eigen-5.0.0/
+/eigen340_old/
+/eigen_full/
+eigen*.tar.gz
+
+# --- One-off probes, crash repros, ad-hoc build harnesses ---
+build_crashtest*.bat
+build_probe*.bat
+crash*
+crashtest*
+decode_*.py
+compare_nt.py
+pretty_check*
+probe_*
+npfc_probe*
+test_harness*
 tests/dbg_*.py
+
+# --- Compiler / linker / build scratch ---
+*.obj
+*.ilk
+*.lib
+*.exp
+*.mdmp
+*.bin
+*.log
+*.out
 *.exe
 *.pdb
 *.dll
+
+# --- Scratch text output (keep recorded parity refs under tests/) ---
+*.txt
+!tests/*.txt

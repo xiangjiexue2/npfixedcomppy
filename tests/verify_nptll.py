@@ -1,9 +1,13 @@
-"""Verify npfixedcomppy (Rust) nptll against R npfixedcomp2 references."""
+"""Verify npfixedcomppy (C++/Eigen) nptll against R npfixedcomp2 references."""
+import os
+
 import numpy as np
 from npfixedcomppy import computemixdist, estpi0
 
-data1000 = np.loadtxt("C:/Users/xxjie/Documents/rebuild/npfc_data_1000.csv", delimiter=",", skiprows=1, ndmin=1)
-data5000 = np.loadtxt("C:/Users/xxjie/Documents/rebuild/npfc_data_5000.csv", delimiter=",", skiprows=1, ndmin=1)
+DATA_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+data1000 = np.loadtxt(os.path.join(DATA_ROOT, "npfc_data_1000.csv"), delimiter=",", skiprows=1, ndmin=1)
+data5000 = np.loadtxt(os.path.join(DATA_ROOT, "npfc_data_5000.csv"), delimiter=",", skiprows=1, ndmin=1)
 
 REF = {
     "CM_T_INF": dict(

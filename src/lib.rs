@@ -8,12 +8,14 @@
 //   grid     - initial mixing distribution & grid points (nspmix initial.* / gridpoints.*)
 //   engine   - core computemixdist / estpi0 driver
 //   families - per-family loss/gradient/mapping implementations (Family trait)
-
+//   npfc_ffi - FFI into the C++/Eigen core (cpp/npfc_core.cpp): SIMD is chosen
+//              by the compiler at build time, OpenMP is used when available
 mod engine;
 mod families;
 mod grid;
 mod misc;
 mod nnls;
+mod npfc_ffi;
 mod pretty;
 mod stats;
 
@@ -585,6 +587,15 @@ fn version() -> &'static str {
 
 #[pymodule]
 fn _core(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // The C++ core's OpenMP workers idle-spin by default (OMP_WAIT_POLICY=
+    // active) and, when this module coexists with the rayon pool, the spin
+    // burns cores the rayon tasks need (measured: solvegrad 20 -> 35 ms at
+    // n=5000). Set passive *before* any C++ call so libomp initializes with
+    // sleeping workers. Must happen at module import — libomp reads the
+    // variable only once, at first thread-team creation.
+    if std::env::var_os("OMP_WAIT_POLICY").is_none() {
+        std::env::set_var("OMP_WAIT_POLICY", "passive");
+    }
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(npnormll, m)?)?;
     m.add_function(wrap_pyfunction!(npnormll_estpi0, m)?)?;

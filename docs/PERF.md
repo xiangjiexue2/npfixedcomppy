@@ -1,194 +1,151 @@
-# SIMD + Parallel Computing Strategy
+# Performance
 
-This document records the performance architecture of `npfixedcomppy`, the
-evidence behind it (measured on the development machine, n = 5000, k = 200,
-12 threads), and the **rules** that keep the parallelism safe and
-predictable.
+This document records the performance architecture of `npfixedcomppy` and
+the evidence behind it (measured on the development machine).
 
 ## 1. Where the time goes
 
-Phase profile of a full `computemixdist` call at **n = 5000**
-(`NPFIXEDCOMPY_PROFILE=1`), after the kernel cache (section 6):
+Phase profile of a full `computemixdist` call
+(`NPFIXEDCOMPY_PROFILE=1` prints one line to stderr, median of 3 runs):
 
 | case | iters | total | solvegrad | mapping | weights | collapse | loss |
 |------|-------|-------|-----------|---------|---------|----------|------|
-| `npnormll` β=1 | 15 | **39.4 ms** | 22.9 | 1.4 | 8.4 | 6.3 | 0.4 |
-| `nptll` β=5 | 31 | 509.6 ms | 290.9 | 37.1 | 71.0 | 109.2 | 1.3 |
-| `nptll` β=∞ | 15 | 31.8 ms | 18.2 | 1.2 | 6.6 | 5.4 | 0.4 |
+| `nptll` β=5, n=5000 | 31 | **2.99 s** | ≈2.5 s | 0.3 | 8.8 | 260 | 0.8 |
+| `npnormcll`, n=1000 | 19 | **0.99 s** | 462 | 2.2 | 501 | 29 | 0.1 |
+| `nptll` β=∞, n=1000 | 15 | **36 ms** | ≈20 | 1 | 8 | 6 | 0.5 |
+| `npnormll`, n=5000 | 15 | **18 ms** | ≈10 | <1 | 2 | 3 | 0.3 |
 
-The dominant hot paths, in descending cost order:
+Reading the profile:
 
-| # | hot path | cost at n=5000, k=200 (median) | parallelism used |
-|---|----------|-------------------------------|------------------|
-| 1 | kernel-matrix fill `K[i][j] = kernel(data[i], mu[j])` | serial 6.3 ms (normal) / 22.5 ms (poisson) → **1.1 / 3.2 ms with rayon** | rayon over observation rows |
-| 2 | gradient sums over the data (per support point) | same order as (1) | single-pass per-thread accumulators (`par_acc`) |
-| 3 | small GEMMs: Gram `G = KᵀK`, mat-vec `s = Kᵀv`, NNLS | 10–11 ms (Gram), 2.8 ms (mat-vec), scalar | LLVM auto-vectorization |
+* **`nptll` β=5** — dominated by `solvegrad`: the derivative-free
+  support-point search evaluates many *off-grid* points per iteration, and
+  each off-grid point is one full data-column of the non-central-t kernel
+  (`dnt` = AS-243 series, the most expensive kernel in the package). The
+  kernel column cache eliminates the *on-grid* re-evaluations (≈1.4 s of
+  the pre-cache 4.4 s); what remains is the irreducible off-grid work plus
+  the 260 ms of `collapse` remapping.
+* **`npnormcll`** — dominated by `weights` (≈50 %): the per-iteration
+  constrained NNLS subproblem (`pnnlssum` for n ≤ 1000, `pnnqp` beyond),
+  plus the grid sweep in `solvegrad`. These are the algorithm's intrinsic
+  small-matrix solves, not re-evaluation waste.
+* Everything else (mapping after the cache, loss, collapse) is single-digit
+  milliseconds.
 
-Everything else (grid construction, bisection bookkeeping, Armijo line
-search) is < 1 % of runtime. The `nptll` β=5 row shows why the t family is
-the slow one: each of its 31 iterations runs the derivative-free parabolic
-search (`dfmin`) on several crossing intervals, and **every interior
-evaluation is a fresh O(n) pass over the data** — those points are not on
-the grid, so the section-6 cache cannot help them.
+## 2. Compute core: serial C++/Eigen
 
-## 2. The parallelism model: ONE pool, never nested
+The whole compute stack — engine, support-point solvers, constrained NNLS,
+gradient and weight sweeps, kernel-matrix fills, the mixture density —
+lives in `cpp/` (pybind11 module `npfixedcomppy._core`, built by
+`setup.py` with MSVC `/std:c++17 /O2 /arch:AVX2`, GCC/Clang
+`-O3 -mavx2` elsewhere).
 
-The package uses **exactly one thread pool** (`rayon`) at **exactly one
-layer**. The rules:
+**SIMD is decided by the compiler at BUILD time, not at runtime.**
+`/arch:AVX2` lets the compiler emit the widest instructions the build host
+supports — `exp` auto-vectorizes to packed math sequences and the scalar
+loops get full autovec. The same source rebuilds cleanly on a machine
+without AVX2 (override with `NPFIC_ARCH=`, everything falls back to
+scalar, same code path). No runtime ISA dispatch.
 
-1. **No nested parallelism.** Any code that may run inside a rayon task
-   (all of `families.rs`, `nnls.rs`, `engine.rs`) must not itself launch
-   rayon work or call a BLAS/linear-algebra library with its own internal
-   threading. A second pool inside a task either starves the outer pool
-   (barrier deadlock at best) or oversubscribes the cores (thread explosion
-   at worst).
-2. **Parallel only over observations (n), never over support points (k).**
-   `k` is small (default grid = 100, a few support points per fit); there is
-   no work to share. `n` is the only large dimension.
-3. **Serial fallback below a threshold.** Per-observation loops are serial
-   for `n < PAR_N` (default 2048, overridable via the
-   `NPFIXEDCOMPY_PAR_N` environment variable). Below the threshold the
-   serial path is also **bit-identical** to the original ported code —
-   the rayon path uses tree reductions that reassociate floating-point
-   additions and change only the last ulps (far below the 1e-6 parity
-   tolerance used against the R reference).
-4. **faer (SIMD) may be layered on, but only without its rayon feature.**
-   `faer`'s SIMD GEMM kernels (pulp) are single-threaded, so calling
-   `matmul(…, Par::Seq)` from a rayon task is legal under rule 1. The
-   default feature set of `faer` **enables its own rayon pool** — if faer
-   is ever added as a real dependency it must be declared as
-   `default-features = false, features = ["std", "linalg"]` (this is what
-   the prototype `Cargo.toml` dev-dependency does). Using
-   `Par::Rayon` inside a rayon task would violate rule 1.
+**There is no OpenMP and no thread pool — the solver is fully serial.**
+All hand-written `#pragma omp` was stripped (it interacted badly with
+Eigen's internal thread handling and made results machine-dependent);
+Eigen's own compile-time parallel GEMM is disabled, so the process owns
+exactly zero worker threads. The consequence:
 
-### Thread control
+* **bit-identical determinism** — identical inputs give bit-identical
+  outputs on every machine, which the GOLD parity gates rely on;
+* no thread-pool oversubscription to tune, no `OMP_*`/`RAYON_*` knobs.
 
-| knob | effect |
-|------|--------|
-| `NPFIXEDCOMPY_PAR_N` (env) | raise it to force the fully-serial, bit-identical path (used by parity gates and benchmarking) |
-| `RAYON_NUM_THREADS` (env) | size the single rayon pool (e.g. `1` for serial timing, or to cap CPU usage) |
-| none | default: pool = physical cores, parallel for `n ≥ 2048` |
+The one environment knob is `NPFIXEDCOMPY_PROFILE=1` (per-phase timing).
 
-The library never calls `rayon::ThreadPool::builder` itself; it uses the
-global pool, so callers can size it once for the whole process.
+## 3. The kernel column cache
 
-## 3. Why not a SIMD GEMM library (faer)? — measured evidence
+The dominant waste before the cache: the engine re-evaluates the *same*
+kernel columns on every pass of every outer iteration — the `solvegrad`
+grid sweep, `mapping`, the `computeweights` fill, the `collapse`
+remapping, the end-of-iteration mapping. For the expensive kernels
+(non-central-t, normal CDF, one-parameter normal) that is 3–8 redundant
+evaluations of each `(n × m)` matrix per iteration.
 
-The user's concern was to *avoid* a parallel-SIMD library (its internal
-pool would nest under our rayon pool). `faer` can be used **without**
-internal threading (`Par::Seq` + no `rayon` feature), so it was prototyped
-honestly — it is **no longer in the dependency tree at all**; the
-numbers below were measured with it as a temporary dev-dependency and are
-kept here as the record of the decision.
-
-Measured (i7-8700K, 12 threads, `cargo run --release --example
-bench_simd`, median of 5):
-
-| op (n=5000, k=200) | nalgebra (current) | faer `Par::Seq` | nalgebra, rayon row-blocks |
-|--------------------|-------------------|-----------------|----------------------------|
-| Gram `G = KᵀK` (0.40 GFlop) | 10.98 ms (36.4 GF) | 12.33 ms (32.4 GF) | **10.04 ms (39.8 GF)** |
-| mat-vec `s = Kᵀv` (0.002 GFlop) | 2.79 ms | 4.92 ms | **2.35 ms** |
-| kernel fill, normal (1 M elts) | 6.34 ms serial → 1.12 ms rayon | n/a (no primitive) | — |
-| kernel fill, poisson (1 M elts) | 22.45 ms serial → 3.24 ms rayon | n/a (no primitive) | — |
-
-**Conclusions**
-
-1. **faer is ~12 % *slower* than nalgebra here.** The reason is the
-   shape: `k = 200` is far below the ~512–1024 column count at which
-   GEMM libraries start beating the simple `m × n` dot-loop. At such
-   "tall-and-thin" shapes the arithmetic is dominated by streaming
-   (memory-bound) reductions along `n`; the small `k × k` tile never
-   fills an AVX2 lane's worth of independent work, and faer's
-   kernel dispatch overhead plus its column-major packing of the LHS
-   loses to nalgebra's contiguous row-major inner loop. Note the bench
-   is a *stress test*: in production the GEMM dimension is the number
-   of current support points `m` (typically 1–10 per fit, ≤ ~20 before
-   collapse), **not** the 100-point grid — the real shapes are even
-   further inside the streaming-dominated regime where no GEMM library
-   wins.
-2. **SIMD is still used — implicitly.** The nalgebra kernels the engine
-   calls (`*` for the small Gram/mat-vec, the NNLS Householder
-   reflections) are ordinary `f64` loops that LLVM auto-vectorizes with
-   AVX2 on this CPU; the measured 36–40 GFlops (vs ~0.2 GFlops serial in
-   scalar C) is the auto-vec win. No hand-written SIMD is needed.
-3. **The winning parallelism is the outer rayon layer** (6.4× on the
-   normal fill, 6.9× on the poisson fill), which faer does not provide
-   for our fill pattern anyway (the kernel is transcendental and
-   row-independent — there is no off-the-shelf primitive; a per-column
-   `zip!` would force a non-contiguous access pattern over `data` and
-   lose to the row loop).
-4. **If `k` were ever large** (e.g. a 2000-point grid for a binned
-   family), the trade changes: a no-rayon faer `Par::Seq` GEMM should be
-   re-benchmarked, *and* the row-block decomposition of variant B3
-   (rayon over n-blocks, each block doing the GEMM on its sub-matrix,
-   block results summed) remains the safe pattern under rule 1 — it gave
-   the best Gram number above (39.8 GF) without any second pool.
-
-**Decision: keep nalgebra + rayon. faer was removed from the dependency
-tree** (the `bench_simd` example now benchmarks only the production
-patterns: nalgebra serial, nalgebra + rayon row-blocks, and the rayon
-kernel fill).
-
-## 4. estpi0 refinement
-
-`estpi0`'s outer bisection is embarrassingly serial (each step needs the
-previous), so all its parallelism is *inside* the inner
-`computemixdist` calls (section 1). The `fast` refinement mode (default
-`true`) performs one inner solve per bisection step at `inner_tol`
-instead of two at 1e-6; it is an algorithmic, not a threading, change —
-no interaction with rules 1–4.
-
-## 6. The grid kernel cache (n = 5000: normal 73.6 ms → 39.4 ms)
-
-Before this cache, every `solvegrad` grid sweep of the normal family
-recomputed the full data×grid kernel `dnormv(data[i], mu[j], beta)`
-(n × |grid| transcendental evaluations) on every iteration — 56 ms of the
-73.6 ms total at n = 5000. Both `npnormll` and `nptll` now precompute the
-matrix once per fit in `prepare` (called by the engine when the sorted
-grid is fixed) and store it column-major (`kmat[j*n + i]`), so each
-iteration's full-grid sweep is a plain dot product against contiguous
-columns.
+A kernel column `K[:, mu]` depends ONLY on `(data, beta, mu)` — never on
+the current weights, density, or iteration — so each distinct `mu` is
+evaluated **exactly once per fit** (in `prepare` for grid points, lazily
+on first use for off-grid points) and every consumer reads the shared
+column.
 
 Correctness is preserved, not approximated:
 
-* The kernel depends only on the data, `beta` and the grid — never on the
-  current weights or the fixed components — so the matrix is valid for the
-  whole fit, including across `estpi0`'s bisection (same family instance,
-  same grid).
-* The cached sweep accumulates column `j` **serially over `i`**, in the
-  exact order and arithmetic of the original per-point loop
-  (`dnormv(data[i], kgrid[j], beta) * fullden[i]`), so the result is
-  bit-identical to the uncached path — the GOLD/BAND parity gates and the
-  deterministic re-run check pass unchanged.
-* Non-grid evaluations (interior points of the Brent / parabolic root
-  solvers, `mapping`, the weight subproblem) never touch the cache; they
-  keep their original code paths.
+* a cached column is produced by the exact same per-row evaluation as a
+  fresh fill (ascending `i`, identical arithmetic), so it is
+  **bit-identical** to an uncached computation — only redundant
+  re-evaluation is removed, never the arithmetic or its order;
+* consumers that build an `(n × m)` matrix from the columns keep the
+  reference column-by-column accumulation;
+* all five parity suites (npnormll / nptll / cvmadcll / pois / density)
+  pass `TOTAL BAD: 0` unchanged with the cache in place.
 
-Measured at n = 5000 (single runs, `NPFIXEDCOMPY_PROFILE=1`):
+Measured effect (this build):
 
-| case | before | after |
-|------|--------|-------|
-| `npnormll` β=1, 15 iters | 73.6 ms (solvegrad 56.0) | **39.4 ms (solvegrad 22.9)** |
-| `nptll` β=∞, 15 iters | 72.0 ms (solvegrad ≈54) | **31.8 ms (solvegrad 18.2)** |
-| `nptll` β=5, 31 iters | 495 ms (solvegrad ≈283) | 509.6 ms (solvegrad 290.9) |
+| case | before cache | after cache |
+|------|-------------|-------------|
+| `nptll` β=5, n=5000 | 4.43 s | **3.0 s** (−32 %) |
+| `npnormcll`, n=1000 | 1.21 s | **0.99 s** (−19 %) |
+| `npnormad`, n=1000 | 60 ms | **37 ms** (−38 %) |
+| `npnormcvm`, n=1000 | — | **36 ms** |
+| `nptll` β=∞, n=1000 | 43 ms | **36 ms** |
+| `npnormll`, n=1000 / n=5000 | 8 ms / 18 ms | **8 ms / 18 ms** (already near the floor) |
 
-The β=5 row is unchanged **by construction**: its grid sweep was already
-the cached one, and the remaining cost is the derivative-free interior
-searches, which evaluate points off the grid (see section 1). The cache
-allocation itself is `n × |grid|` f64 ≈ 0.4 MB at n = 5000, |grid| = 100,
-built once in `prepare` (parallel over columns for `n ≥ PAR_N`).
+## 4. Comparison with R `npfixedcomp2` (same machine)
 
-## 7. Reproducing the evidence
+Median of 3, `computemixdist`, recorded via `bench_r.R` /
+`tests/perf_baseline.py`:
+
+| case | `npfixedcomppy` | R | speedup |
+|------|-----------------|---|---------|
+| `npnormll`, n=1000 | 7.8 ms | 15 ms | 1.9× |
+| `nptll` β=∞, n=1000 | 36 ms | 212 ms | 5.8× |
+| `nptll` β=5, n=5000 | 3.0 s | 50.0 s | 16.6× |
+| `npnormcll`, n=1000 | 988 ms | 1.95 s | 2.0× |
+| `npnormad`, n=1000 | 37 ms | 38 ms | 1.0× |
+| `nppoisll`, n=1000 | 0.62 ms | 5 ms | 8.1× |
+| `estpi0` (norm), n=1000 | 25 ms | — | — |
+
+The big wins are the expensive-kernel cases (β=5 t, 16.6×). The
+`npnormad` row is at parity: its AD loss weights are per-iteration and the
+fit converges in few iterations, so the cache removes little absolute
+time.
+
+## 5. What was *not* done, and why
+
+* **Hand-written OpenMP** — stripped entirely (see section 2); it was a
+  crash/determinism hazard and the gains are re-obtained bit-safely by the
+  cache.
+* **SIMD GEMM library (`faer`)** — earlier measurements (tall-and-thin
+  `n × m` with `m ≤ ~20` production columns) showed GEMM libraries lose to
+  a streaming dot-loop at these shapes; not adopted.
+* **Threading the remaining work** — the two remaining hotspots (the
+  off-grid `dnt` evaluations in `solvegrad`, the NNLS in `weights`) are
+  embarrassingly parallel over `n`, but any thread pool reintroduces the
+  determinism/oversubscription trade-offs above. Kept serial per the
+  design constraint; the measured speedups versus R already come from the
+  single-threaded core + the cache.
+
+## 6. Reproducing the evidence
 
 ```bat
 cd npfixedcomppy
-set NPFIXEDCOMPY_PAR_N=2048
-cargo run --release --example bench_simd
+.venv\Scripts\python.exe tests\perf_baseline.py          :: wall-time table
+set NPFIXEDCOMPY_PROFILE=1
+.venv\Scripts\python.exe tests\profile_n5000.py          :: per-phase line (n=5000)
+"C:\Program Files\R\R-4.6.1\bin\Rscript.exe" bench_r.R   :: R reference times
 ```
 
-Parity with the fully-serial path (what the R-parity gates rely on):
+Parity gates (all must report `TOTAL BAD: 0`):
 
 ```bat
-set NPFIXEDCOMPY_PAR_N=999999999
-python tests\verify_nptll.py
+.venv\Scripts\python.exe tests\verify_npnormll.py
+.venv\Scripts\python.exe tests\verify_nptll.py
+.venv\Scripts\python.exe tests\verify_cvmadcll.py
+.venv\Scripts\python.exe tests\verify_pois.py
+.venv\Scripts\python.exe tests\verify_density.py
 ```

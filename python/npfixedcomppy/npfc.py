@@ -9,10 +9,13 @@ All heavy computation — the histogram-based initial mixing distribution
 and support grid, the density/mapping/gradient evaluations, the
 constrained non-negative least-squares subproblems, and the support-point
 solvers (improved Brent / successive parabolic interpolation) — runs in
-the bundled Rust extension ``npfixedcomppy._core``; this module is a thin,
-R-compatible front-end. Results are designed to match the R package to
-working precision (typically ``ll`` to relative error ``1e-9`` and support
-points to ``1e-6``).
+the bundled ``npfixedcomppy._core`` extension (C++/Eigen); this module is
+a thin, R-compatible front-end. Results are designed to match the R
+package to working precision (typically ``ll`` to relative error ``1e-9``
+and support points to ``1e-6``).
+
+The extension is built without OpenMP; all linear algebra is serial Eigen,
+so there are no extra worker threads to coordinate.
 
 Implemented families (the ``method`` argument)
 ----------------------------------------------
@@ -109,7 +112,12 @@ class Npmix:
 
     @property
     def mix(self) -> dict:
-        """``{"pt": [...], "pr": [...]}`` (R-compatible accessor)."""
+        """R-compatible accessor: ``{"pt": [...], "pr": [...]}``.
+
+        Mirrors the ``$mix`` component of the R ``nspmix`` result object,
+        so code written against the R package can read the support points
+        and weights via ``r.mix["pt"]`` / ``r.mix["pr"]``.
+        """
         return {"pt": self.pt, "pr": self.pr}
 
     def __repr__(self) -> str:  # pragma: no cover - trivial
@@ -127,7 +135,7 @@ def _to_vec(x: Optional[Sequence[float]]) -> list:
 
 
 def computemixdist(
-    v,
+    v: Sequence[float],
     method: str = "npnormll",
     mu0=None,
     pi0=None,
@@ -217,6 +225,13 @@ def computemixdist(
         If ``method`` is not implemented, or a method requiring ``beta``
         (``"npnormcll"``) is called without it.
 
+    Notes
+    -----
+    Deterministic: identical inputs produce bit-identical results. The
+    solver is fully serial; each kernel column (the data vector evaluated
+    at one support value) is computed once per fit and reused by every
+    consumer, so no re-evaluation can ever change a result.
+
     Examples
     --------
     >>> import numpy as np
@@ -254,7 +269,7 @@ def computemixdist(
 
 
 def estpi0(
-    v,
+    v: Sequence[float],
     method: str = "npnormll",
     beta: Optional[float] = None,
     val: Optional[float] = None,
@@ -332,6 +347,13 @@ def estpi0(
         ``0.0``) is included among ``pt``/``pr`` when the test threshold is
         exceeded, otherwise the unconstrained estimate is returned.
 
+    Notes
+    -----
+    Deterministic like :func:`computemixdist`. With ``fast=True`` the
+    reported point mass is accurate to ``tol`` in the hypothesis
+    statistic; with ``fast=False`` the refinement matches the R/C++
+    legacy path bit-for-bit.
+
     Examples
     --------
     >>> import numpy as np
@@ -358,7 +380,7 @@ def estpi0(
 
 
 def _to_npmix(res) -> Npmix:
-    """Convert a Rust-returned dict into an :class:`Npmix`."""
+    """Convert a ``_core`` result mapping into an :class:`Npmix`."""
     if isinstance(res, Npmix):
         return res
     return Npmix(
@@ -375,11 +397,40 @@ def _to_npmix(res) -> Npmix:
 
 
 class _FamilySpec:
+    """Per-family defaults.
+
+    Attributes
+    ----------
+    default_beta : float
+        The structural parameter used when the caller does not supply one.
+    needs_beta : bool
+        If ``True``, an explicit ``beta`` is mandatory and a missing one
+        raises ``ValueError`` (currently only ``"npnormcll"``).
+    """
+
     def __init__(self, default_beta: float, needs_beta: bool):
         self.default_beta = default_beta
         self.needs_beta = needs_beta
 
 
+#: Implemented families: ``method`` name -> :class:`_FamilySpec`.
+#:
+#: +-------------+--------------+-------------------------------+
+#: | method      | default beta | meaning of ``beta``           |
+#: +=============+==============+===============================+
+#: | ``npnormll``| ``1.0``      | normal scale                  |
+#: +-------------+--------------+-------------------------------+
+#: | ``npnormcvm``| ``1.0``     | normal scale                  |
+#: +-------------+--------------+-------------------------------+
+#: | ``npnormad`` | ``1.0``      | normal scale                  |
+#: +-------------+--------------+-------------------------------+
+#: | ``nptll``    | ``inf``      | t degrees of freedom          |
+#: |             |              | (``inf`` = the normal kernel) |
+#: +-------------+--------------+-------------------------------+
+#: | ``npnormcll``| required     | number of observations        |
+#: +-------------+--------------+-------------------------------+
+#: | ``nppoisll`` | ``1.0``      | Poisson scale                 |
+#: +-------------+--------------+-------------------------------+
 FAMILIES = {
     "npnormll": _FamilySpec(1.0, False),
     "npnormcvm": _FamilySpec(1.0, False),
