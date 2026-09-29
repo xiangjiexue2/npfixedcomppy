@@ -7,10 +7,12 @@ with Eigen (vendored in eigen/) for the linear algebra.
 
 Compiler flags:
 
-* ``/arch:AVX2``  -- SIMD width decided at BUILD time; override with the
-  environment variable ``NPFIC_ARCH`` (e.g. ``NPFIC_ARCH=`` for plain x86-64)
-  when targeting hosts without AVX2. The same source also compiles for
-  gcc/clang (``-mavx2 -O3``).
+* SIMD width is decided at BUILD time by the build machine's own ISA:
+  MSVC ``/arch:`` auto and gcc/clang ``-march=native`` enable the widest
+  instruction set the compiler's host supports (AVX2/AVX512/FMA on x86-64,
+  NEON/SVE on aarch64), so Eigen picks its widest packet traits
+  automatically. Note the build artifact only runs on hardware with the
+  same or a superset of that instruction set.
 
 Threading: this package has NO hand-written OpenMP. The only multi-threading
 comes from Eigen's own compile-time-gated parallel GEMM/GEMV, which is
@@ -39,20 +41,17 @@ INCLUDE_DIRS = [
     pybind11.get_include(),
 ]
 
-arch = os.environ.get("NPFIC_ARCH", "AVX2")
-
 if platform.system() == "Windows":
     # /utf-8: the headers carry non-ASCII comment text; MSVC's default
     # code page (936 here) would flag C4819 and can mis-decode it.
     cxx_flags = ["/std:c++17", "/O2", "/MD", "/J", "/EHsc", "/utf-8"]
-    if arch:
-        cxx_flags.append("/arch:" + arch)
     link_flags = []
 else:
+    # -march=native: widest ISA the build machine supports (x86-64: AVX2/
+    # AVX512/FMA as available; aarch64: NEON/SVE); Eigen picks packet traits
+    # from it automatically. The artifact only runs on hardware with the
+    # same or a superset of this instruction set.
     cxx_flags = ["-std=c++17", "-O3", "-march=native"]
-    if arch == "AVX2":
-        cxx_flags = [f for f in cxx_flags if f != "-march=native"]
-        cxx_flags.append("-mavx2")
     link_flags = []
 
 ext = Extension(

@@ -12,6 +12,7 @@
 
 #define _USE_MATH_DEFINES
 #include <algorithm>
+#include <cfloat> // DBL_EPSILON (MSVC drags in <float.h> transitively; clang does not)
 #include <cmath>
 #include <limits>
 #include <vector>
