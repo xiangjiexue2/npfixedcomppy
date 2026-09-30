@@ -8,9 +8,11 @@ the point-mass proportion at zero (``estpi0``).
 All heavy computation runs in a bundled C++/Eigen extension
 (``npfixedcomppy._core``, built with pybind11); the Python layer is a
 thin, R-compatible front-end. Results are designed to match the R
-package to working precision for the families below. The solver is
-fully serial and deterministic (SIMD width is decided at build time;
-there is no OpenMP), so identical inputs always produce bit-identical
+package to working precision for the families below. There are no
+hand-written OpenMP loops: at build time ``setup.py`` detects whether the
+compiler supports the OpenMP flag and, if so, enables Eigen's own
+compile-time-parallel GEMM/GEMV through that flag alone (otherwise the
+build is serial Eigen). Identical inputs always produce identical
 outputs.
 
 Public API
@@ -49,13 +51,21 @@ from npfixedcomppy.npfc import (  # noqa: F401
     FAMILIES,
     Npmix,
     computemixdist,
+    covestEB,
+    covestEB_cor,
+    CovEBResult,
     estpi0,
+    posteriormean,
     __version__,
 )
 
 __all__ = [
     "computemixdist",
     "estpi0",
+    "posteriormean",
+    "covestEB",
+    "covestEB_cor",
+    "CovEBResult",
     "Npmix",
     "FAMILIES",
     "__version__",

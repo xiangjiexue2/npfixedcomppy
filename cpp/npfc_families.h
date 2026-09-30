@@ -195,6 +195,34 @@ inline Eigen::MatrixXd kmat_cached_scaled(const kern::KernelColumnCache& kc,
     return K;
 }
 
+// Like `kmat_cached`, but row i is additionally multiplied by the
+// precomputed reciprocal `1.0 / row_scale[i]` (the `tp = sp / fp` fill in
+// its reciprocal-multiply form, matching `norm_kernel_scaled`: the same
+// reciprocal pass over the rows, then the same single-rounded
+// `column * reciprocal` multiply per element). Each cached column is a
+// bit-identical copy of the reference per-row kernel evaluation, so the
+// filled matrix is bit-identical to a fresh `norm_kernel_scaled` build —
+// only the redundant re-evaluation of the kernel is removed.
+inline Eigen::MatrixXd kmat_cached_recip(const kern::KernelColumnCache& kc,
+                                         const std::vector<double>& mu,
+                                         const std::vector<double>& row_scale) {
+    const std::size_t n = kc.n();
+    const std::size_t m = mu.size();
+    Eigen::MatrixXd K(static_cast<Eigen::Index>(n), static_cast<Eigen::Index>(m));
+    // The reciprocal pass, exactly as `norm_kernel_scaled` computes it
+    // (once per call, O(n)).
+    std::vector<double> inv_rs(n);
+    for (std::size_t i = 0; i < n; ++i)
+        inv_rs[i] = 1.0 / row_scale[i];
+    for (std::size_t j = 0; j < m; ++j) {
+        const std::vector<double>& col = kc.column(mu[j]);
+        double* dst = K.data() + j * n;
+        for (std::size_t i = 0; i < n; ++i)
+            dst[i] = col[i] * inv_rs[i];
+    }
+    return K;
+}
+
 // Copy a dense Eigen vector into an owning std::vector (the seam for results
 // crossing back into the std::vector-based family API).
 inline std::vector<double> to_vec(const Eigen::VectorXd& v) {
@@ -226,12 +254,36 @@ public:
           precompute_(kern::dnpnorm(data_, mu0fixed_, pi0fixed_, beta_)) {}
 
     void prepare(const std::vector<double>& grid) override {
+        // Bind the run-wide kernel cache: the column K[:, mu] (the data
+        // evaluated at mu under N(., mu, beta)) depends only on (data,
+        // beta, mu) — never on the weights — so it stays valid for the
+        // whole run, including `estpi0`'s bisection. The per-row eval is
+        // the EXACT expression of `norm_kernel` (same `b2`/`base`
+        // constants, same two-rounding form `-0.5*d*d/b2 - base` inside
+        // one `exp`) in scalar form, so a cached column is bit-identical
+        // to the SIMD column fill; only the redundant re-evaluation is
+        // removed.
+        const double b2 = beta_ * beta_;
+        const double base = stats::LN_SQRT_2PI + std::log(beta_);
+        kc_.init(data_, [b2, base](double x, double mu) {
+            return std::exp(-0.5 * (x - mu) * (x - mu) / b2 - base);
+        });
+        if (grid.empty()) {
+            kgrid_.clear();
+            kmat_.resize(0, 0);
+            return;
+        }
         kgrid_ = grid;
-        // The n x g grid kernel is materialised ONCE here (the eager
-        // materialisation seam) and reused at every iteration's grid sweep.
-        // `norm_kernel` resizes the matrix via Eigen, so no index can stray
-        // off the buffer, and each column's `exp` is a pure SIMD expression.
-        kmat_ = detail::norm_kernel(data_, grid, beta_);
+        // Seed the cache with every grid column (the eager materialisation
+        // seam: each is computed ONCE, in the reference per-row order),
+        // then build the grid matrix as a plain memcpy of the cached
+        // columns — bit-identical to the old per-iteration `norm_kernel`
+        // fill, but every later consumer of a grid point is an O(1) lookup.
+        for (double mu : grid) {
+            kc_.pin(mu);
+            kc_.column(mu);
+        }
+        kmat_ = detail::kmat_cached(kc_, grid);
     }
 
     const std::vector<double>& precompute() const override { return precompute_; }
@@ -248,10 +300,13 @@ public:
     std::vector<double> mapping(const std::vector<double>& mu0,
                                 const std::vector<double>& pi0) const override {
         // density(x) = sum_j pi0[j] N(x; mu0[j], beta) = K(x, mu0) * pi0:
-        // one bounds-checked SIMD kernel fill plus a single GEMV.
-        return detail::to_vec(
-            (detail::norm_kernel(data_, mu0, beta_) * detail::to_eigen(pi0))
-                .eval());
+        // the kernel columns come from the (once-per-point) cache — a
+        // bit-identical memcpy of the reference per-row evaluation — plus a
+        // single GEMV.
+        if (mu0.empty())
+            return std::vector<double>(len_, 0.0);
+        const Eigen::MatrixXd K = detail::kmat_cached(kc_, mu0);
+        return detail::to_vec(K * detail::to_eigen(pi0));
     }
 
     // Unified gradient sweep over support points `mu` (single support point
@@ -288,15 +343,20 @@ public:
         }
         const Eigen::Map<const Eigen::VectorXd> fl(flv.data(), n);
         // Reuse the precomputed grid kernel when the sweep points are the
-        // (sorted) grid itself; otherwise build the (n x m) kernel for these
-        // points. The reference (not a copy) keeps the per-iteration grid
-        // sweep allocation-free.
+        // (sorted) grid itself (the per-iteration grid sweep); otherwise
+        // materialise the (n x m) kernel for these points from the
+        // run-wide column cache — a bit-identical memcpy of the reference
+        // per-row evaluation for every column. The reference (not a copy)
+        // keeps the per-iteration grid sweep allocation-free.
         const bool cached =
             m == kgrid_.size() &&
             (m == 0 || std::equal(mu.begin(), mu.end(), kgrid_.begin()));
+        // Two lvalue branches (NOT `cached ? kmat_ : kmat_cached(...)`,
+        // whose prvalue operand would copy the grid matrix every sweep and
+        // dangle the reference).
         Eigen::MatrixXd ktmp;
         if (!cached)
-            ktmp = detail::norm_kernel(data_, mu, beta_);
+            ktmp = detail::kmat_cached(kc_, mu);
         const Eigen::MatrixXd& K = cached ? kmat_ : ktmp;
         // kfl[j]  = sum_i K[i, j] fl[i];  kflx[j] = sum_i K[i, j] fl[i] x[i].
         const Eigen::VectorXd kfl = K.transpose() * fl;
@@ -346,8 +406,11 @@ public:
         std::vector<double> fp(len_);
         for (std::size_t i = 0; i < len_; ++i)
             fp[i] = dens[i] + precompute_[i];
+        // The same reciprocal-multiply form as `norm_kernel_scaled` (the
+        // kernel columns are served from the run-wide cache, bit-identical
+        // to a fresh fill), so `tp` is unchanged at the bit level.
         const Eigen::MatrixXd tp =
-            detail::norm_kernel_scaled(data_, mu0, beta_, fp);
+            detail::kmat_cached_recip(kc_, mu0, fp);
         const Eigen::Map<const Eigen::VectorXd> fpv(fp.data(), n);
         // The constrained weight subproblem (column-major GEMM/GEMV feed the
         // NNLS solver).
@@ -429,6 +492,7 @@ private:
     std::vector<double> precompute_;
     std::vector<double> kgrid_;
     Eigen::MatrixXd kmat_;
+    kern::KernelColumnCache kc_;
 };
 
 // ===========================================================================
@@ -468,6 +532,7 @@ public:
             double* col = raw.data() + j * n;
             for (std::size_t i = 0; i < n; ++i)
                 col[i] = stats::dnt(data_[i], beta_, mj);
+            kc_.pin(mj);
             kc_.insert(mj, std::vector<double>(col, col + n));
         }
         kmat_ = std::move(raw);
@@ -657,8 +722,10 @@ public:
         kc_.init(data_, [this](double x, double mu) {
             return stats::pnorm(x, mu, beta_, true);
         });
-        for (double mu : grid)
+        for (double mu : grid) {
+            kc_.pin(mu);
             kc_.column(mu);
+        }
     }
 
     const std::vector<double>& precompute() const override { return precompute_; }
@@ -850,8 +917,10 @@ public:
         kc_.init(data_, [this](double x, double mu) {
             return stats::pnorm(x, mu, beta_, true);
         });
-        for (double mu : grid)
+        for (double mu : grid) {
+            kc_.pin(mu);
             kc_.column(mu);
+        }
     }
 
     double lossfunction(const std::vector<double>& maps) const override {
@@ -1086,8 +1155,10 @@ public:
         // Seed the cache with the full grid sweep (each column evaluated
         // once, in the reference row order); every later consumer of a grid
         // point is an O(1) lookup.
-        for (double mu : grid)
+        for (double mu : grid) {
+            kc_.pin(mu);
             kc_.column(mu);
+        }
     }
 
     const std::vector<double>& precompute() const override { return precompute_; }
