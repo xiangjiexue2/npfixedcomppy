@@ -3,10 +3,11 @@
 # npt=92 (element-wise comparable); EP_CLL is deterministic with npt=87 but the
 # Python fit lands on a neighbouring 88-pt point in the flat region, so only its
 # ll is golded (the test gates EP_CLL on ll + invariants, not pt/pr).
+# Run from tests/ (the data file and the output both live here).
 library(npfixedcomp2)
-v <- read.csv("C:/Users/xxjie/Documents/rebuild/npfc_data_1000.csv")[, 1]
+v <- read.csv("npfc_data_1000.csv")[, 1]
 n <- length(v)
-out <- file("tests/gold_cvmadcll.txt", open = "wt")
+out <- file("gold_cvmadcll.txt", open = "wt")
 cll <- computemixdist(tanh(v), method = "npnormcll", beta = n)
 cat("CLL", sprintf("%.17g", cll$ll), length(cll$mix$pt), as.character(cll$iter), "\n", file = out)
 cat("CLL_pt", paste(sprintf("%.17g", cll$mix$pt), collapse = " "), "\n", file = out)

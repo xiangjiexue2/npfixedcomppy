@@ -1,8 +1,9 @@
 # R wall-time on the hot cases, to benchmark npfixedcomppy against.
+# Run from tests/ (the data files live here).
 library(npfixedcomp2)
-v1 <- read.csv("C:/Users/xxjie/Documents/rebuild/npfc_data_1000.csv")[, 1]
-v5 <- read.csv("C:/Users/xxjie/Documents/rebuild/npfc_data_5000.csv")[, 1]
-pois <- read.csv("C:/Users/xxjie/Documents/rebuild/npfc_data_pois.csv")[, 1]
+v1 <- read.csv("npfc_data_1000.csv")[, 1]
+v5 <- read.csv("npfc_data_5000.csv")[, 1]
+pois <- read.csv("npfc_data_pois.csv")[, 1]
 timeit <- function(tag, expr) {
   t0 <- Sys.time()
   r <- expr

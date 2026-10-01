@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "npfixedcomppy"
-version = "0.1.0"
+version = "0.2.0"
 description = "Non-parametric estimation of mixing distributions with fixed components (C++/Eigen + pybind11 port of the R package npfixedcomp2)"
 authors = [{ name = "Xiangjie Xue (original R package)" }]
 readme = "README.md"

@@ -1476,6 +1476,833 @@ private:
     std::vector<double> precompute_;
 };
 
+// ===========================================================================
+// Binned ("...w") families — the R `npnormllw` / `npnormcvmw` / `npnormadw` /
+// `nptllw` large-scale variants. The caller pre-bins the observations into
+// `(bin centres, counts)` and passes `h = 10^order`; the kernels are the
+// binned ones in npfc_kernels.h (trapezoid-rule binned normal density,
+// CDF-difference binned normal cdf, CDF-difference binned non-central-t
+// density). The loss is the weighted form: each bin `i` contributes `count_i`
+// copies of its centre, so every loss/gradient/weight sweep is `count`-
+// weighted.
+//
+// Cache note (faithful to R): the trapezoid binned-density kernel
+// `ddiscnorm_m` fixes its subdivision count `N` from the RANGE of the whole
+// support set, and the CDF-difference kernel `pnorm_disc_m` flips its shift
+// direction on the `n > m` size test — so neither is a function of `(x, mu)`
+// alone and CANNOT be served from the per-point column cache. These three
+// normal-binned families therefore rebuild the (n x m) kernel matrix on each
+// mapping/gradient/weight call, exactly as the R package does. The binned
+// non-central-t density `ddisct_v` IS a pure function of `(x, mu)`, so
+// `NpTLLW` reuses the run-wide column cache (the expensive kernel is cached;
+// a cached column is bit-identical to a fresh per-row fill).
+// ===========================================================================
+
+// `weights_sum`: the total count (sum of the bin weights).
+namespace detail {
+template <typename T>
+inline double weights_sum_of(const T& v) {
+    double s = 0.0;
+    for (double x : v)
+        s += x;
+    return s;
+}
+}  // namespace detail
+
+// ---------------------------------------------------------------------------
+// NpNormLLW — binned normal mixing, maximum likelihood (flag d0)
+// ---------------------------------------------------------------------------
+
+class NpNormLLW : public Family {
+public:
+    NpNormLLW(std::vector<double> data, std::vector<double> weights,
+              std::vector<double> mu0fixed, std::vector<double> pi0fixed,
+              double beta, double h)
+        : data_(std::move(data)),
+          len_(data_.size()),
+          weights_(std::move(weights)),
+          beta_(beta),
+          h_(h),
+          mu0fixed_(std::move(mu0fixed)),
+          pi0fixed_(std::move(pi0fixed)),
+          precompute_(kern::dnpdiscnorm(data_, mu0fixed_, pi0fixed_, beta_,
+                                        h_)) {}
+
+    const std::vector<double>& precompute() const override {
+        return precompute_;
+    }
+
+    double lossfunction(const std::vector<double>& maps) const override {
+        // -sum_i log(maps[i] + pre[i]) * count_i (weighted log-likelihood).
+        return -detail::par_sum1(len_, [this, &maps](std::size_t i) {
+            return std::log(maps[i] + precompute_[i]) * weights_[i];
+        });
+    }
+
+    std::vector<double> mapping(const std::vector<double>& mu0,
+                                const std::vector<double>& pi0) const override {
+        return kern::dnpdiscnorm(data_, mu0, pi0, beta_, h_);
+    }
+
+    // Only the probability-direction gradient `a0` is defined (the R class
+    // leaves `a1` uninitialised; the `d0` solver never reads it).
+    void gradfun(double mu, const std::vector<double>& dens, bool d0, bool d1,
+                 double& a0, double& a1) const override {
+        (void)d1;
+        if (!d0) {
+            a0 = a1 = 0.0;
+            return;
+        }
+        const double scale = 1.0 - sum_pi0fixed();
+        // temp = dnpdiscnorm_(data, mu, scale, beta, h): the single support
+        // point `mu` carrying the remaining mass `scale`.
+        const std::vector<double> temp =
+            kern::dnpdiscnorm(data_, {mu}, {scale}, beta_, h_);
+        double s = 0.0;
+        for (std::size_t i = 0; i < len_; ++i)
+            s += (dens[i] - temp[i]) * weights_[i] / (dens[i] + precompute_[i]);
+        a0 = s;
+        a1 = 0.0;
+    }
+
+    void gradfunvec(const std::vector<double>& mu, const std::vector<double>& dens,
+                    bool d0, bool d1, std::vector<double>& a0,
+                    std::vector<double>& a1) const override {
+        (void)d1;
+        const std::size_t m = mu.size();
+        a0.assign(m, 0.0);
+        a1.assign(m, 0.0);
+        if (m == 0 || !d0)
+            return;
+        const double scale = 1.0 - sum_pi0fixed();
+        const std::size_t n = len_;
+        // fullden[i] = count_i / (dens[i] + pre[i]); dens_dot = sum_i
+        // dens[i] * fullden[i].
+        std::vector<double> fullden(n);
+        double dens_dot = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            const double fl = weights_[i] / (dens[i] + precompute_[i]);
+            fullden[i] = fl;
+            dens_dot += dens[i] * fl;
+        }
+        const Eigen::MatrixXd D = kern::ddiscnorm_m(data_, mu, beta_, h_);
+        const Eigen::Map<const Eigen::VectorXd> fv(fullden.data(),
+                                                   static_cast<Eigen::Index>(n));
+        const Eigen::VectorXd kfl = D.transpose() * fv;
+        for (std::size_t j = 0; j < m; ++j)
+            a0[j] = dens_dot -
+                    kfl(static_cast<Eigen::Index>(j)) * scale;
+    }
+
+    void computeweights(const std::vector<double>& mu0, std::vector<double>& pi0,
+                        const std::vector<double>& dens) const override {
+        const std::size_t m = mu0.size();
+        if (m == 0 || pi0.size() != m)
+            return;
+        const std::size_t n = len_;
+        const double sum = 1.0 - sum_pi0fixed();
+        std::vector<double> fp(n);
+        for (std::size_t i = 0; i < n; ++i)
+            fp[i] = dens[i] + precompute_[i];
+        const Eigen::MatrixXd sp = kern::ddiscnorm_m(data_, mu0, beta_, h_);
+        std::vector<double> wsq(n);
+        for (std::size_t i = 0; i < n; ++i)
+            wsq[i] = std::sqrt(weights_[i]);
+        // tw = (sp / fp) * sqrt(count) row-scaled (the weighted `tp`).
+        Eigen::MatrixXd tw(n, static_cast<Eigen::Index>(m));
+        for (std::size_t i = 0; i < n; ++i) {
+            const double w = wsq[i];
+            const double fi = fp[i];
+            for (std::size_t j = 0; j < m; ++j)
+                tw(i, j) = sp(i, j) / fi * w;
+        }
+        Eigen::VectorXd bv(n);
+        for (std::size_t i = 0; i < n; ++i)
+            bv(i) = (2.0 - precompute_[i] / fp[i]) * wsq[i];
+        const std::vector<double> nw =
+            nnls::pnnlssum(tw.data(), n, m, bv.data(), sum);
+        // diff = sp * nw - dens
+        std::vector<double> diff(n, 0.0);
+        for (std::size_t i = 0; i < n; ++i) {
+            double v = 0.0;
+            for (std::size_t j = 0; j < m; ++j)
+                v += sp(i, j) * nw[j];
+            diff[i] = v - dens[i];
+        }
+        std::vector<double> eta(m);
+        for (std::size_t j = 0; j < m; ++j)
+            eta[j] = nw[j] - pi0[j];
+        // p = tp^T * weights, where tp[i, j] = sp[i, j] / fp[i].
+        std::vector<double> pcol(m, 0.0);
+        for (std::size_t j = 0; j < m; ++j)
+            for (std::size_t i = 0; i < n; ++i)
+                pcol[j] += sp(i, j) / fp[i] * weights_[i];
+        checklossfun2(diff, pi0, eta, pcol, dens);
+    }
+
+    double extrafun() const override {
+        return detail::weights_sum_of(weights_) * std::log(h_);
+    }
+    double hypofun(double ll, double minloss) const override {
+        return ll - minloss;
+    }
+
+    double familydensity(double x, const std::vector<double>& mu0,
+                         const std::vector<double>& pi0) const override {
+        return kern::dnpdiscnorm({x}, mu0, pi0, beta_, h_)[0];
+    }
+
+    void set_fixed(const std::vector<double>& mu0fixed,
+                   const std::vector<double>& pi0fixed) override {
+        mu0fixed_ = mu0fixed;
+        pi0fixed_ = pi0fixed;
+        precompute_ = kern::dnpdiscnorm(data_, mu0fixed_, pi0fixed_, beta_, h_);
+    }
+
+    const char* family_name() const override { return "npnorm"; }
+    const char* flag() const override { return "d0"; }
+    double beta_value() const override { return beta_; }
+
+private:
+    double sum_pi0fixed() const {
+        double s = 0.0;
+        for (double v : pi0fixed_)
+            s += v;
+        return s;
+    }
+
+    std::vector<double> data_;
+    std::size_t len_;
+    std::vector<double> weights_;
+    double beta_;
+    double h_;
+    std::vector<double> mu0fixed_, pi0fixed_;
+    std::vector<double> precompute_;
+};
+
+// ---------------------------------------------------------------------------
+// NpNormCVMW — binned normal mixing, Cramer-von Mises distance (flag d1)
+// ---------------------------------------------------------------------------
+
+class NpNormCVMW : public Family {
+public:
+    NpNormCVMW(std::vector<double> data, std::vector<double> weights,
+               std::vector<double> mu0fixed, std::vector<double> pi0fixed,
+               double beta, double h)
+        : data_(std::move(data)),
+          len_(data_.size()),
+          weights_(std::move(weights)),
+          beta_(beta),
+          h_(h),
+          mu0fixed_(std::move(mu0fixed)),
+          pi0fixed_(std::move(pi0fixed)) {
+        recompute_pre();
+    }
+
+    const std::vector<double>& precompute() const override {
+        return precompute_;
+    }
+
+    double lossfunction(const std::vector<double>& maps) const override {
+        // CVM: a squared distance, minimised, count-weighted:
+        // sum_i (maps[i] - pre[i])^2 * count_i.
+        return detail::par_sum1(len_, [this, &maps](std::size_t i) {
+            const double d = maps[i] - precompute_[i];
+            return d * d * weights_[i];
+        });
+    }
+
+    std::vector<double> mapping(const std::vector<double>& mu0,
+                                const std::vector<double>& pi0) const override {
+        return kern::pnpdiscnorm(data_, mu0, pi0, beta_, h_);
+    }
+
+    void gradfun(double mu, const std::vector<double>& dens, bool d0, bool d1,
+                 double& a0, double& a1) const override {
+        if (!d0 && !d1) {
+            a0 = a1 = 0.0;
+            return;
+        }
+        const double scale = 1.0 - sum_pi0fixed();
+        const std::size_t n = len_;
+        // fullden[i] = (dens[i] - pre[i]) * count_i.
+        std::vector<double> fullden(n);
+        for (std::size_t i = 0; i < n; ++i)
+            fullden[i] = (dens[i] - precompute_[i]) * weights_[i];
+        // d0: 2 * sum_i (Phi_disc(mu; scale) - dens[i]) * fullden[i], where
+        // Phi_disc(mu; scale) is the single-point binned-cdf mixture.
+        double sum_new = 0.0;
+        if (d0) {
+            const std::vector<double> pcol =
+                kern::pnpdiscnorm(data_, {mu}, {scale}, beta_, h_);
+            for (std::size_t i = 0; i < n; ++i)
+                sum_new += (pcol[i] - dens[i]) * fullden[i];
+        }
+        // d1: -2*scale * sum_i N_disc(x_i; mu) * fullden[i] (binned pdf).
+        double sum_d1 = 0.0;
+        if (d1) {
+            const std::vector<double> dcol =
+                kern::dnpdiscnorm(data_, {mu}, {1.0}, beta_, h_);
+            for (std::size_t i = 0; i < n; ++i)
+                sum_d1 += dcol[i] * fullden[i];
+        }
+        a0 = d0 ? sum_new * 2.0 : 0.0;
+        a1 = d1 ? sum_d1 * (-2.0 * scale) : 0.0;
+    }
+
+    void gradfunvec(const std::vector<double>& mu, const std::vector<double>& dens,
+                    bool d0, bool d1, std::vector<double>& a0,
+                    std::vector<double>& a1) const override {
+        const std::size_t m = mu.size();
+        a0.assign(m, 0.0);
+        a1.assign(m, 0.0);
+        if (m == 0)
+            return;
+        const double scale = 1.0 - sum_pi0fixed();
+        const std::size_t n = len_;
+        std::vector<double> fullden(n);
+        for (std::size_t i = 0; i < n; ++i)
+            fullden[i] = (dens[i] - precompute_[i]) * weights_[i];
+        const bool do0 = d0, do1 = d1;
+        if (!do0 && !do1)
+            return;
+        const Eigen::MatrixXd P =
+            do0 ? kern::pnorm_disc_m(data_, mu, beta_, h_) : Eigen::MatrixXd();
+        const Eigen::MatrixXd D =
+            do1 ? kern::ddiscnorm_m(data_, mu, beta_, h_) : Eigen::MatrixXd();
+        for (std::size_t j = 0; j < m; ++j) {
+            if (do0) {
+                double s = 0.0;
+                for (std::size_t i = 0; i < n; ++i)
+                    s += (P(i, j) * scale - dens[i]) * fullden[i];
+                a0[j] = s * 2.0;
+            }
+            if (do1) {
+                double s = 0.0;
+                for (std::size_t i = 0; i < n; ++i)
+                    s += D(i, j) * fullden[i];
+                a1[j] = s * (-2.0 * scale);
+            }
+        }
+    }
+
+    void computeweights(const std::vector<double>& mu0, std::vector<double>& pi0,
+                        const std::vector<double>& /*dens*/) const override {
+        const std::size_t m = mu0.size();
+        if (m == 0 || pi0.size() != m)
+            return;
+        const std::size_t n = len_;
+        const double scale = 1.0 - sum_pi0fixed();
+        const Eigen::MatrixXd P = kern::pnorm_disc_m(data_, mu0, beta_, h_);
+        std::vector<double> wsq(n);
+        for (std::size_t i = 0; i < n; ++i)
+            wsq[i] = std::sqrt(weights_[i]);
+        Eigen::MatrixXd tw(n, static_cast<Eigen::Index>(m));
+        for (std::size_t i = 0; i < n; ++i) {
+            const double w = wsq[i];
+            for (std::size_t j = 0; j < m; ++j)
+                tw(i, j) = P(i, j) * w;
+        }
+        Eigen::VectorXd bv(n);
+        for (std::size_t i = 0; i < n; ++i)
+            bv(i) = precompute_[i] * wsq[i];
+        // The weighted CVM weight subproblem assigns the NNLS solution
+        // directly (the R class has no line search here).
+        pi0 = nnls::pnnlssum(tw.data(), n, m, bv.data(), scale);
+    }
+
+    double extrafun() const override {
+        // count.sum()/3 - sum_i ((ecdf_i - count_i/2)/count.sum())^2 * count_i.
+        const double sumw = detail::weights_sum_of(weights_);
+        double cum = 0.0, s = 0.0;
+        for (std::size_t i = 0; i < len_; ++i) {
+            cum += weights_[i];
+            const double d = (cum - weights_[i] / 2.0) / sumw;
+            s += d * d * weights_[i];
+        }
+        return sumw / 3.0 - s;
+    }
+    double hypofun(double ll, double /*minloss*/) const override { return ll; }
+
+    double familydensity(double x, const std::vector<double>& mu0,
+                         const std::vector<double>& pi0) const override {
+        return kern::dnpdiscnorm({x}, mu0, pi0, beta_, h_)[0];
+    }
+
+    void set_fixed(const std::vector<double>& mu0fixed,
+                   const std::vector<double>& pi0fixed) override {
+        mu0fixed_ = mu0fixed;
+        pi0fixed_ = pi0fixed;
+        recompute_pre();
+    }
+
+    const char* family_name() const override { return "npnorm"; }
+    const char* flag() const override { return "d1"; }
+    double beta_value() const override { return beta_; }
+
+private:
+    // Binned-CVM precompute: empirical midpoints (ecdf_i - count_i/2)/count.sum()
+    // minus the fixed-component binned-cdf.
+    void recompute_pre() {
+        const std::vector<double> fixed =
+            kern::pnpdiscnorm(data_, mu0fixed_, pi0fixed_, beta_, h_);
+        const double sumw = detail::weights_sum_of(weights_);
+        double cum = 0.0;
+        precompute_.resize(len_);
+        for (std::size_t i = 0; i < len_; ++i) {
+            cum += weights_[i];
+            precompute_[i] = (cum - weights_[i] / 2.0) / sumw - fixed[i];
+        }
+    }
+
+    double sum_pi0fixed() const {
+        double s = 0.0;
+        for (double v : pi0fixed_)
+            s += v;
+        return s;
+    }
+
+    std::vector<double> data_;
+    std::size_t len_;
+    std::vector<double> weights_;
+    double beta_;
+    double h_;
+    std::vector<double> mu0fixed_, pi0fixed_;
+    std::vector<double> precompute_;
+};
+
+// ---------------------------------------------------------------------------
+// NpNormADW — binned normal mixing, Anderson-Darling distance (flag d1)
+// ---------------------------------------------------------------------------
+
+class NpNormADW : public Family {
+public:
+    NpNormADW(std::vector<double> data, std::vector<double> weights,
+              std::vector<double> mu0fixed, std::vector<double> pi0fixed,
+              double beta, double h)
+        : data_(std::move(data)),
+          len_(data_.size()),
+          weights_(std::move(weights)),
+          beta_(beta),
+          h_(h),
+          mu0fixed_(std::move(mu0fixed)),
+          pi0fixed_(std::move(pi0fixed)) {
+        // Weighted AD endpoints from the binned empirical cdf:
+        // w1 = (2*ecdf - count) * count / count.sum(); w2 = 2*count - w1.
+        const double sumw = detail::weights_sum_of(weights_);
+        double cum = 0.0;
+        w1_.resize(len_);
+        w2_.resize(len_);
+        for (std::size_t i = 0; i < len_; ++i) {
+            cum += weights_[i];
+            w1_[i] = (2.0 * cum - weights_[i]) * weights_[i] / sumw;
+            w2_[i] = 2.0 * weights_[i] - w1_[i];
+        }
+        recompute_pre();
+    }
+
+    const std::vector<double>& precompute() const override {
+        return precompute_;
+    }
+
+    double lossfunction(const std::vector<double>& maps) const override {
+        return -detail::par_sum1(len_, [this, &maps](std::size_t i) {
+            const double t = maps[i] + precompute_[i];
+            return w1_[i] * std::log(t) + w2_[i] * std::log1p(-t);
+        });
+    }
+
+    std::vector<double> mapping(const std::vector<double>& mu0,
+                                const std::vector<double>& pi0) const override {
+        return kern::pnpdiscnorm(data_, mu0, pi0, beta_, h_);
+    }
+
+    void gradfun(double mu, const std::vector<double>& dens, bool d0, bool d1,
+                 double& a0, double& a1) const override {
+        if (!d0 && !d1) {
+            a0 = a1 = 0.0;
+            return;
+        }
+        const double scale = 1.0 - sum_pi0fixed();
+        const std::size_t n = len_;
+        std::vector<double> s1(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            const double fl = dens[i] + precompute_[i];
+            s1[i] = w1_[i] / fl - w2_[i] / (1.0 - fl);
+        }
+        double s1_dot_new = 0.0, sum_w2_term = 0.0;
+        if (d0) {
+            const std::vector<double> pcol =
+                kern::pnpdiscnorm(data_, {mu}, {scale}, beta_, h_);
+            for (std::size_t i = 0; i < n; ++i) {
+                s1_dot_new += s1[i] * (pcol[i] + precompute_[i]);
+                sum_w2_term +=
+                    w2_[i] / (1.0 - (dens[i] + precompute_[i]));
+            }
+        }
+        // d1 uses the UNBINNED normal pdf shifted by -h (R's `dnpnorm_(data,
+        // mu - h, scale, beta)`).
+        double s1_dot_d1 = 0.0;
+        if (d1)
+            for (std::size_t i = 0; i < n; ++i)
+                s1_dot_d1 += s1[i] * stats::dnorm(data_[i], mu - h_, beta_) * scale;
+        a0 = d0 ? (s1_dot_new + sum_w2_term) * -1.0 +
+                      2.0 * detail::weights_sum_of(weights_)
+                : 0.0;
+        a1 = d1 ? s1_dot_d1 : 0.0;
+    }
+
+    void gradfunvec(const std::vector<double>& mu, const std::vector<double>& dens,
+                    bool d0, bool d1, std::vector<double>& a0,
+                    std::vector<double>& a1) const override {
+        const std::size_t m = mu.size();
+        a0.assign(m, 0.0);
+        a1.assign(m, 0.0);
+        if (m == 0)
+            return;
+        const double scale = 1.0 - sum_pi0fixed();
+        const std::size_t n = len_;
+        std::vector<double> s1(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            const double fl = dens[i] + precompute_[i];
+            s1[i] = w1_[i] / fl - w2_[i] / (1.0 - fl);
+        }
+        const double sum_w2_term =
+            d0 ? detail::par_sum1(n, [this, &dens](std::size_t i) {
+                    return w2_[i] / (1.0 - (dens[i] + precompute_[i]));
+                })
+               : 0.0;
+        if (!d0 && !d1)
+            return;
+        const Eigen::MatrixXd P =
+            d0 ? kern::pnorm_disc_m(data_, mu, beta_, h_) : Eigen::MatrixXd();
+        for (std::size_t j = 0; j < m; ++j) {
+            if (d0) {
+                double s = 0.0;
+                for (std::size_t i = 0; i < n; ++i)
+                    s += (P(i, j) * scale + precompute_[i]) * s1[i];
+                a0[j] = s * -1.0 +
+                        2.0 * detail::weights_sum_of(weights_) - sum_w2_term;
+            }
+            if (d1) {
+                double s = 0.0;
+                for (std::size_t i = 0; i < n; ++i)
+                    s += stats::dnorm(data_[i], mu[j] - h_, beta_) * s1[i];
+                a1[j] = s * scale;
+            }
+        }
+    }
+
+    void computeweights(const std::vector<double>& mu0, std::vector<double>& pi0,
+                        const std::vector<double>& dens) const override {
+        const std::size_t m = mu0.size();
+        if (m == 0 || pi0.size() != m)
+            return;
+        const std::size_t n = len_;
+        const double scale = 1.0 - sum_pi0fixed();
+        const Eigen::MatrixXd sf = kern::pnorm_disc_m(data_, mu0, beta_, h_);
+        std::vector<double> sp(n);
+        for (std::size_t i = 0; i < n; ++i)
+            sp[i] = dens[i] + precompute_[i];
+        Eigen::MatrixXd S(n, static_cast<Eigen::Index>(m)),
+            U(n, static_cast<Eigen::Index>(m));
+        for (std::size_t i = 0; i < n; ++i) {
+            const double spi = sp[i];
+            const double spm1 = sp[i] - 1.0;
+            for (std::size_t j = 0; j < m; ++j) {
+                S(i, j) = sf(i, j) / spi;
+                U(i, j) = sf(i, j) / spm1;
+            }
+        }
+        Eigen::VectorXd s2 =
+            S.transpose() * Eigen::Map<const Eigen::VectorXd>(w1_.data(), n) +
+            U.transpose() * Eigen::Map<const Eigen::VectorXd>(w2_.data(), n);
+        Eigen::MatrixXd sr(n, static_cast<Eigen::Index>(m)),
+            ur(n, static_cast<Eigen::Index>(m));
+        for (std::size_t i = 0; i < n; ++i) {
+            const double sw1 = std::sqrt(w1_[i]);
+            const double sw2 = std::sqrt(w2_[i]);
+            for (std::size_t j = 0; j < m; ++j) {
+                sr(i, j) = S(i, j) * sw1;
+                ur(i, j) = U(i, j) * sw2;
+            }
+        }
+        const Eigen::MatrixXd q = sr.transpose() * sr + ur.transpose() * ur;
+        Eigen::VectorXd p = -2.0 * s2;
+        for (std::size_t j = 0; j < m; ++j) {
+            p[j] += detail::par_sum1(n, [this, &S, &U, &sp, j](std::size_t i) {
+                return S(i, j) * precompute_[i] / sp[i] * w1_[i] +
+                       U(i, j) * (1.0 - precompute_[i]) / (1.0 - sp[i]) * w2_[i];
+            });
+        }
+        const std::vector<double> nw =
+            nnls::pnnqp(q.data(), m, p.data(), scale);
+        std::vector<double> diff(n, 0.0);
+        for (std::size_t i = 0; i < n; ++i) {
+            double v = 0.0;
+            for (std::size_t j = 0; j < m; ++j)
+                v += sf(i, j) * nw[j];
+            diff[i] = v - dens[i];
+        }
+        std::vector<double> eta(m);
+        for (std::size_t j = 0; j < m; ++j)
+            eta[j] = nw[j] - pi0[j];
+        std::vector<double> s2v(m);
+        for (std::size_t j = 0; j < m; ++j)
+            s2v[j] = s2[j];
+        checklossfun2(diff, pi0, eta, s2v, dens);
+    }
+
+    double extrafun() const override {
+        return -detail::weights_sum_of(weights_);
+    }
+    double hypofun(double ll, double /*minloss*/) const override { return ll; }
+
+    double familydensity(double x, const std::vector<double>& mu0,
+                         const std::vector<double>& pi0) const override {
+        return kern::dnpdiscnorm({x}, mu0, pi0, beta_, h_)[0];
+    }
+
+    void set_fixed(const std::vector<double>& mu0fixed,
+                   const std::vector<double>& pi0fixed) override {
+        mu0fixed_ = mu0fixed;
+        pi0fixed_ = pi0fixed;
+        recompute_pre();
+    }
+
+    const char* family_name() const override { return "npnorm"; }
+    const char* flag() const override { return "d1"; }
+    double beta_value() const override { return beta_; }
+
+private:
+    void recompute_pre() {
+        precompute_ = kern::pnpdiscnorm(data_, mu0fixed_, pi0fixed_, beta_, h_);
+    }
+
+    double sum_pi0fixed() const {
+        double s = 0.0;
+        for (double v : pi0fixed_)
+            s += v;
+        return s;
+    }
+
+    std::vector<double> data_;
+    std::size_t len_;
+    std::vector<double> weights_;
+    double beta_;
+    double h_;
+    std::vector<double> mu0fixed_, pi0fixed_;
+    std::vector<double> precompute_;
+    std::vector<double> w1_, w2_;
+};
+
+// ---------------------------------------------------------------------------
+// NpTLLW — binned non-central-t mixing, maximum likelihood (flag d0)
+// ---------------------------------------------------------------------------
+
+class NpTLLW : public Family {
+public:
+    NpTLLW(std::vector<double> data, std::vector<double> weights,
+           std::vector<double> mu0fixed, std::vector<double> pi0fixed,
+           double beta, double h)
+        : data_(std::move(data)),
+          len_(data_.size()),
+          weights_(std::move(weights)),
+          beta_(beta),
+          h_(h),
+          mu0fixed_(std::move(mu0fixed)),
+          pi0fixed_(std::move(pi0fixed)),
+          precompute_(kern::dnpdisct(data_, mu0fixed_, pi0fixed_, beta_, h_)) {}
+
+    void prepare(const std::vector<double>& grid) override {
+        // The binned non-central-t density is a pure function of (x, mu), so
+        // it IS served from the run-wide column cache (the expensive kernel;
+        // a cached column is bit-identical to a fresh per-row fill).
+        kc_.init(data_, [this](double x, double mu) {
+            return kern::ddisct_v(x, beta_, mu, h_);
+        });
+        if (grid.empty()) {
+            kgrid_.clear();
+            kmat_.clear();
+            return;
+        }
+        kgrid_ = grid;
+        const std::size_t g = grid.size();
+        const std::size_t n = len_;
+        std::vector<double> raw(n * g, 0.0);
+        for (std::size_t j = 0; j < g; ++j) {
+            const double mj = grid[j];
+            double* col = raw.data() + j * n;
+            for (std::size_t i = 0; i < n; ++i)
+                col[i] = kern::ddisct_v(data_[i], beta_, mj, h_);
+            kc_.pin(mj);
+            kc_.insert(mj, std::vector<double>(col, col + n));
+        }
+        kmat_ = std::move(raw);
+    }
+
+    const std::vector<double>& precompute() const override {
+        return precompute_;
+    }
+
+    double lossfunction(const std::vector<double>& maps) const override {
+        return -detail::par_sum1(len_, [this, &maps](std::size_t i) {
+            return std::log(maps[i] + precompute_[i]) * weights_[i];
+        });
+    }
+
+    std::vector<double> mapping(const std::vector<double>& mu0,
+                                const std::vector<double>& pi0) const override {
+        if (mu0.empty())
+            return std::vector<double>(len_, 0.0);
+        const Eigen::MatrixXd K = detail::kmat_cached(kc_, mu0);
+        return detail::to_vec(K * detail::to_eigen(pi0));
+    }
+
+    void gradfun(double mu, const std::vector<double>& dens, bool d0, bool d1,
+                 double& a0, double& a1) const override {
+        (void)d1;
+        if (!d0) {
+            a0 = a1 = 0.0;
+            return;
+        }
+        const double scale = 1.0 - sum_pi0fixed();
+        const std::size_t n = len_;
+        const std::vector<double>& col = kc_.column(mu);
+        double s = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            const double fl = weights_[i] / (dens[i] + precompute_[i]);
+            s += (dens[i] - col[i] * scale) * fl;
+        }
+        a0 = s;
+        a1 = 0.0;
+    }
+
+    void gradfunvec(const std::vector<double>& mu, const std::vector<double>& dens,
+                    bool d0, bool d1, std::vector<double>& a0,
+                    std::vector<double>& a1) const override {
+        (void)d1;
+        const std::size_t m = mu.size();
+        a0.assign(m, 0.0);
+        a1.assign(m, 0.0);
+        if (m == 0 || !d0)
+            return;
+        const double scale = 1.0 - sum_pi0fixed();
+        const std::size_t n = len_;
+        std::vector<double> fullden(n);
+        double dens_dot = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            const double fl = weights_[i] / (dens[i] + precompute_[i]);
+            fullden[i] = fl;
+            dens_dot += dens[i] * fl;
+        }
+        const std::size_t g = kgrid_.size();
+        const bool cached =
+            g == m && kmat_.size() == n * g &&
+            std::equal(mu.begin(), mu.end(), kgrid_.begin(),
+                       [](double a, double b) {
+                           return std::isfinite(a) && a == b;
+                       });
+        const double* kdata = kmat_.data();
+        for (std::size_t j = 0; j < m; ++j) {
+            const std::vector<double>* colp =
+                cached ? nullptr : &kc_.column(mu[j]);
+            const double* col = colp ? colp->data() : kdata + j * n;
+            double s = 0.0;
+            for (std::size_t i = 0; i < n; ++i)
+                s += col[i] * fullden[i];
+            a0[j] = dens_dot - s * scale;
+        }
+    }
+
+    void computeweights(const std::vector<double>& mu0, std::vector<double>& pi0,
+                        const std::vector<double>& dens) const override {
+        const std::size_t m = mu0.size();
+        if (m == 0 || pi0.size() != m)
+            return;
+        const std::size_t n = len_;
+        const double sum = 1.0 - sum_pi0fixed();
+        std::vector<double> fp(n);
+        for (std::size_t i = 0; i < n; ++i)
+            fp[i] = dens[i] + precompute_[i];
+        // tp = sp / fp, where sp is the (n x m) binned non-central-t pdf
+        // matrix (columns from the run-wide cache).
+        const Eigen::MatrixXd tp = detail::kmat_cached_scaled(kc_, mu0, fp);
+        std::vector<double> wsq(n);
+        for (std::size_t i = 0; i < n; ++i)
+            wsq[i] = std::sqrt(weights_[i]);
+        Eigen::MatrixXd tw(n, static_cast<Eigen::Index>(m));
+        for (std::size_t i = 0; i < n; ++i) {
+            const double w = wsq[i];
+            for (std::size_t j = 0; j < m; ++j)
+                tw(i, j) = tp(i, j) * w;
+        }
+        Eigen::VectorXd bv(n);
+        for (std::size_t i = 0; i < n; ++i)
+            bv(i) = (2.0 - precompute_[i] / fp[i]) * wsq[i];
+        // R's nptllw weight subproblem is a weighted NNLS (no pnnqp branch).
+        const std::vector<double> nw =
+            nnls::pnnlssum(tw.data(), n, m, bv.data(), sum);
+        std::vector<double> diff(n, 0.0);
+        for (std::size_t i = 0; i < n; ++i) {
+            double v = 0.0;
+            for (std::size_t j = 0; j < m; ++j)
+                v += tp(i, j) * nw[j];
+            diff[i] = fp[i] * v - dens[i];
+        }
+        std::vector<double> eta(m);
+        for (std::size_t j = 0; j < m; ++j)
+            eta[j] = nw[j] - pi0[j];
+        // p = tp^T * weights.
+        std::vector<double> pcol(m, 0.0);
+        for (std::size_t j = 0; j < m; ++j)
+            for (std::size_t i = 0; i < n; ++i)
+                pcol[j] += tp(i, j) * weights_[i];
+        checklossfun2(diff, pi0, eta, pcol, dens);
+    }
+
+    double extrafun() const override {
+        return detail::weights_sum_of(weights_) * std::log(h_);
+    }
+    double hypofun(double ll, double minloss) const override {
+        return ll - minloss;
+    }
+
+    double familydensity(double x, const std::vector<double>& mu0,
+                         const std::vector<double>& pi0) const override {
+        return kern::dnpdisct({x}, mu0, pi0, beta_, h_)[0];
+    }
+
+    void set_fixed(const std::vector<double>& mu0fixed,
+                   const std::vector<double>& pi0fixed) override {
+        mu0fixed_ = mu0fixed;
+        pi0fixed_ = pi0fixed;
+        precompute_ = kern::dnpdisct(data_, mu0fixed_, pi0fixed_, beta_, h_);
+    }
+
+    const char* family_name() const override { return "npt"; }
+    const char* flag() const override { return "d0"; }
+    double beta_value() const override { return beta_; }
+
+private:
+    double sum_pi0fixed() const {
+        double s = 0.0;
+        for (double v : pi0fixed_)
+            s += v;
+        return s;
+    }
+
+    std::vector<double> data_;
+    std::size_t len_;
+    std::vector<double> weights_;
+    double beta_;
+    double h_;
+    std::vector<double> mu0fixed_, pi0fixed_;
+    std::vector<double> precompute_;
+    std::vector<double> kgrid_, kmat_;
+    kern::KernelColumnCache kc_;
+};
+
 }  // namespace fam
 }  // namespace npfc
 

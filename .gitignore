@@ -1,68 +1,27 @@
-# --- Rust / cargo build artifacts ---
-/target/
-
-# --- Python packaging & native extension outputs ---
-build/
-dist/
-*.egg-info/
-.eggs/
-# Extension modules dropped into the source tree by the in-place build
-python/npfixedcomppy/_core*.pyd
-python/npfixedcomppy/_core*.so
-python/npfixedcomppy/_core*.dylib
-
-# --- Environments ---
-.venv*/
-venv/
-env/
-
-# --- Caches ---
+# Python
 __pycache__/
 *.py[cod]
+*.egg-info/
+dist/
+build/
 .pytest_cache/
-.maturin/
-.ruff_cache/
-.ipynb_checkpoints/
 
-# --- Editors / OS ---
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
-desktop.ini
+# Virtual environments
+.venv/
+.venv-*/
 
-# --- Eigen scratch: keep only the vendored include tree `eigen/` ---
-/eigen-5.0.0/
-/eigen340_old/
-/eigen_full/
-eigen*.tar.gz
-
-# --- One-off probes, crash repros, ad-hoc build harnesses ---
-build_crashtest*.bat
-build_probe*.bat
-crash*
-crashtest*
-decode_*.py
-compare_nt.py
-pretty_check*
-probe_*
-npfc_probe*
-test_harness*
-tests/dbg_*.py
-
-# --- Compiler / linker / build scratch ---
+# C++ / MSVC build artifacts
 *.obj
 *.ilk
-*.lib
-*.exp
+*.pdb
 *.mdmp
 *.bin
-*.log
 *.out
-*.exe
-*.pdb
-*.dll
+*.exp
+*.lib
+*.pyd.debug
 
-# --- Scratch text output (keep recorded parity refs under tests/) ---
-*.txt
-!tests/*.txt
+# Test / bench scratch output
+tests/*.log
+tests/npfc_bench_*.csv
+!tests/npfc_bench_data_20000.csv

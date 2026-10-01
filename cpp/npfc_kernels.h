@@ -678,22 +678,36 @@ inline double pnt_log(double t, double df, double ncp, bool lower_tail) {
 // the shift in the mu direction when `n > m` and in the x direction
 // (`x + h`, mu untouched) otherwise — mathematically identical, but the two
 // orderings are not bit-identical, so the size branch is mirrored exactly.
-// Returns the (n x m) column-major CDF matrix.
+// Returns the (n x m) column-major CDF matrix, filled column-by-column in
+// place (no scratch buffer, no transpose).
 inline Eigen::MatrixXd pnorm_disc_m(const std::vector<double>& x,
                                     const std::vector<double>& mu0,
                                     double beta, double h) {
+    const std::size_t n = x.size();
     const std::size_t m = mu0.size();
     const bool shift_mu = x.size() > m;
-    return bfill::fill(x.size(), m,
-                       [&x, &mu0, m, beta, h,
-                        shift_mu](std::size_t i, double* row) {
-                           for (std::size_t j = 0; j < m; ++j)
-                               row[j] = shift_mu
-                                           ? stats::pnorm(x[i], mu0[j] - h, beta,
-                                                          true)
-                                           : stats::pnorm(x[i] + h, mu0[j], beta,
-                                                          true);
-                       });
+    const Eigen::Index ni = static_cast<Eigen::Index>(n);
+    const Eigen::Index mi = static_cast<Eigen::Index>(m);
+    Eigen::MatrixXd ans(ni, mi);
+    if (m == 0)
+        return ans;
+    const Eigen::Map<const Eigen::VectorXd> xv(x.data(), ni);
+    for (std::size_t j = 0; j < m; ++j) {
+        const double mu = mu0[j];
+        if (shift_mu)
+            ans.col(j) = xv.unaryExpr(
+                             [&](double xi) {
+                                 return stats::pnorm(xi, mu - h, beta, true);
+                             })
+                .matrix();
+        else
+            ans.col(j) = xv.unaryExpr(
+                             [&](double xi) {
+                                 return stats::pnorm(xi + h, mu, beta, true);
+                             })
+                .matrix();
+    }
+    return ans;
 }
 
 // `pnpdiscnorm_(x, mu0, pi0, stdev, h)` (non-log): the binned normal-cdf
@@ -725,6 +739,19 @@ inline std::vector<double> pnpdiscnorm(const std::vector<double>& x,
 // `range = max_i |x_i - mu0|`; its vectorised overload uses
 // `max(xmax - mumin, mumax - xmin)`; the two coincide for `m == 1`, so one
 // formula covers both.
+//
+// Filled column-by-column in place: no scratch buffer, no transpose. The
+// per-element arithmetic mirrors R's `dnormarray` exactly —
+// `(x - mu).square() / (-2 beta^2) - logc` then `exp` (a true division, as
+// in R) — with the loop-invariant `logc = ln sqrt(2 pi) + log(beta)`
+// hoisted once per call, as R's expression evaluates it once per column.
+// The accumulation order is R's: `(D0 + D_N) * 0.5`, then `+= D_k` for
+// `k = 1..N-1`, then `* delta`, each `D_k` materialised first (R's
+// `dnormarray` return value; this tree's `operator+=` also only accepts a
+// dense RHS). The order is load-bearing, not cosmetic: the engine's grid
+// sweep selects new support points from these magnitudes, so the fill must
+// stay bit-for-bit R's (a ~1e-15 per-element drift is enough to flip a
+// sweep decision and land on a different, slightly better optimum).
 inline Eigen::MatrixXd ddiscnorm_m(const std::vector<double>& x,
                                    const std::vector<double>& mu0,
                                    double beta, double h) {
@@ -742,24 +769,39 @@ inline Eigen::MatrixXd ddiscnorm_m(const std::vector<double>& x,
         mumin = std::min(mumin, v);
         mumax = std::max(mumax, v);
     }
-    int N = static_cast<int>(std::max(
+    const int N = static_cast<int>(std::max(
         std::ceil(std::max(xmax - mumin, mumax - xmin) * 1e3 *
                          std::pow(h, 1.5)),
         5.0));
     const double delta = h / N;
-    return bfill::fill(n, m, [&x, &mu0, m, N, delta, beta, h](
-                                       std::size_t i, double* row) {
-        const double xi = x[i];
-        for (std::size_t j = 0; j < m; ++j) {
-            const double mu = mu0[j];
-            double ans = (kern::dnormv(xi, mu, beta) +
-                          kern::dnormv(xi, mu - h, beta)) *
-                         0.5;
-            for (int k = 1; k < N; ++k)
-                ans += kern::dnormv(xi, mu - delta * k, beta);
-            row[j] = ans * delta;
+    const double neg2b2 = -2.0 * beta * beta;
+    const double logc = stats::LN_SQRT_2PI + std::log(beta);
+    const Eigen::Index ni = static_cast<Eigen::Index>(n);
+    const Eigen::Index mi = static_cast<Eigen::Index>(m);
+    Eigen::MatrixXd ans(ni, mi);
+    if (m == 0)
+        return ans;
+    const Eigen::Map<const Eigen::VectorXd> xv(x.data(), ni);
+    Eigen::VectorXd tmp(ni), d(ni);
+    for (std::size_t j = 0; j < m; ++j) {
+        const double mu = mu0[j];
+        // `ans = (dnormarray(x, mu) + dnormarray(x, mu - h)) * 0.5`
+        d = ((xv.array() - mu).square() / neg2b2 - logc).exp();
+        tmp = d;
+        d = ((xv.array() - (mu - h)).square() / neg2b2 - logc).exp();
+        tmp += d;
+        tmp *= 0.5;
+        for (int k = 1; k < N; ++k) {
+            // `ans.noalias() += dnormarray(x, mu - delta * k)`
+            d = ((xv.array() - (mu - delta * k)).square() / neg2b2 -
+                 logc)
+                    .exp();
+            tmp += d;
         }
-    });
+        tmp *= delta;
+        ans.col(j) = tmp;
+    }
+    return ans;
 }
 
 // `dnpdiscnorm_(x, mu0, pi0, stdev, h)` (non-log): the binned normal-density

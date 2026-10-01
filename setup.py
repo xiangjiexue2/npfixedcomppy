@@ -7,12 +7,17 @@ with Eigen (vendored in eigen/) for the linear algebra.
 
 Compiler flags:
 
-* SIMD width is decided at BUILD time by the build machine's own ISA:
-  MSVC ``/arch:`` auto and gcc/clang ``-march=native`` enable the widest
-  instruction set the compiler's host supports (AVX2/AVX512/FMA on x86-64,
-  NEON/SVE on aarch64), so Eigen picks its widest packet traits
-  automatically. Note the build artifact only runs on hardware with the
-  same or a superset of that instruction set.
+* The SIMD level is decided at BUILD time by ``NPFIC_ARCH`` (default
+  ``avx2``): MSVC ``/arch:AVX2``, GCC/Clang ``-mavx2``. ``NPFIC_ARCH``
+  overrides it: ``avx``, ``avx512``, ``native`` (GCC/Clang ``-march=native``
+  only), or empty for the plain x86-64 baseline (MSVC's default SSE2,
+  no ``/arch`` flag). The build artifact only runs on hardware with that
+  instruction set or a superset; there is no runtime ISA dispatch and the
+  source is unchanged either way. Note MSVC's ``/arch:AVX2``/``/arch:AVX512``
+  also let the optimizer contract multiply-add pairs into FMA instructions
+  (documented MSVC behaviour even under the default ``/fp:precise``);
+  GCC/Clang keep FMA off unless ``-mfma`` is added explicitly (it is not).
+  The bit-exact parity gates decide which level ships.
 
 Threading: this package has NO hand-written OpenMP. The only multi-threading
 comes from Eigen's own compile-time-gated parallel GEMM/GEMV: at build time
@@ -48,18 +53,47 @@ INCLUDE_DIRS = [
     pybind11.get_include(),
 ]
 
+def _arch_flags() -> list:
+    """SIMD level flags from ``NPFIC_ARCH`` (default ``avx2``).
+
+    Empty value = plain x86-64 baseline (MSVC default SSE2, no ``/arch``).
+    ``native`` is honoured only where the compiler has such a flag
+    (GCC/Clang ``-march=native``); on MSVC it falls back to the default.
+    """
+    level = os.environ.get("NPFIC_ARCH", "avx2").strip().lower()
+    if platform.system() == "Windows":
+        table = {"avx": ["/arch:AVX"], "avx2": ["/arch:AVX2"],
+                 "avx512": ["/arch:AVX512"]}
+        if level in table:
+            return table[level]
+        if level in ("", "native"):
+            # "" = explicit baseline; "native" = no MSVC equivalent.
+            return [] if level == "" else table["avx2"]
+    else:
+        table = {
+            "avx": ["-mavx"],
+            "avx2": ["-mavx2"],
+            "avx512": ["-mavx512f", "-mavx512cd", "-mavx512dq",
+                       "-mavx512er"],
+            "native": ["-march=native"],
+            "": [],
+        }
+        if level in table:
+            return table[level]
+    print(
+        f"npfixedcomppy: unknown NPFIC_ARCH={level!r}, using default avx2"
+    )
+    return ["/arch:AVX2"] if platform.system() == "Windows" else ["-mavx2"]
+
+
 if platform.system() == "Windows":
     # /utf-8: the headers carry non-ASCII comment text; MSVC's default
     # code page (936 here) would flag C4819 and can mis-decode it.
     cxx_flags = ["/std:c++17", "/O2", "/MD", "/J", "/EHsc", "/utf-8"]
-    link_flags = []
 else:
-    # -march=native: widest ISA the build machine supports (x86-64: AVX2/
-    # AVX512/FMA as available; aarch64: NEON/SVE); Eigen picks packet traits
-    # from it automatically. The artifact only runs on hardware with the
-    # same or a superset of this instruction set.
-    cxx_flags = ["-std=c++17", "-O3", "-march=native"]
-    link_flags = []
+    cxx_flags = ["-std=c++17", "-O3"]
+cxx_flags += _arch_flags()
+link_flags = []
 
 # ---------------------------------------------------------------------------
 # OpenMP auto-detection (build-time flag probe only).
@@ -154,7 +188,7 @@ ext = Extension(
 
 setup(
     name="npfixedcomppy",
-    version="0.1.0",
+    version="0.2.0",
     description=(
         "Non-parametric estimation of mixing distributions with fixed "
         "components (C++/Eigen + pybind11 port of the R package npfixedcomp2)"

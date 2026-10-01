@@ -139,6 +139,19 @@ std::vector<double> default_grid_extended(const std::vector<double>& v_sorted,
     return g;
 }
 
+// Weighted variant of `default_grid_extended` for the binned CVM/AD families:
+// the histogram breaks are driven by the bin COUNTS (not unit weights) —
+// the same `c(gridpoints.npnorm(v2), v[1] - 3*beta, v[n] + 3*beta)` the R
+// `npnormcvmw`/`npnormadw` wrappers build on `v2 = npnorm(v1$v, w = v1$w)`.
+std::vector<double> default_grid_extended_w(const std::vector<double>& v_sorted,
+                                            const std::vector<double>& w,
+                                            double beta) {
+    std::vector<double> g = npfc::grid::gridpoints_npnorm(v_sorted, w, beta, 100);
+    g.push_back(v_sorted.front() - 3.0 * beta);
+    g.push_back(v_sorted.back() + 3.0 * beta);
+    return g;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -544,6 +557,306 @@ py::dict nptll_estpi0(py::array_t<double> data, double beta, double val,
 }
 
 // ---------------------------------------------------------------------------
+// the four binned ("...w") families: the caller pre-bins the observations
+// into (bin centres `data`, bin counts `weights`) and passes `h = 10^order`
+// (the R `bin(v, order)` contract). The C++ family receives the bin centres
+// with count weights; the kernel and every loss/gradient/weight sweep are
+// count-weighted accordingly.
+// ---------------------------------------------------------------------------
+
+// Sort the bin centres (and their aligned counts) ascending. The R `bin`
+// helper already returns sorted centres with aligned counts, so this is a
+// no-op on the normal path — it only guards the count-weighted empirical-cdf
+// assumptions of the CVM/AD precompute against an unsorted caller.
+static std::pair<std::vector<double>, std::vector<double>>
+sort_centers_weights(std::vector<double> v, std::vector<double> w) {
+    const std::size_t n = v.size();
+    std::vector<std::size_t> idx(n);
+    for (std::size_t i = 0; i < n; ++i)
+        idx[i] = i;
+    std::stable_sort(idx.begin(), idx.end(),
+                     [&v](std::size_t a, std::size_t b) { return v[a] < v[b]; });
+    std::vector<double> vs(n), ws(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        vs[i] = v[idx[i]];
+        ws[i] = w[idx[i]];
+    }
+    return {std::move(vs), std::move(ws)};
+}
+
+py::dict npnormllw(py::array_t<double> data_in, py::array_t<double> weights_in,
+                   py::array_t<double> mu0fixed, py::array_t<double> pi0fixed,
+                   double beta, double h, py::array_t<double> initpt,
+                   py::array_t<double> initpr,
+                   py::array_t<double> gridpoints, double tol, long maxit,
+                   long verbose) {
+    auto vw = sort_centers_weights(vec_from(data_in), vec_from(weights_in));
+    const std::vector<double>& data = vw.first;
+    const std::vector<double>& weights = vw.second;
+    const std::vector<double> mu0fixed_v = vec_from(mu0fixed);
+    const std::vector<double> pi0fixed_v = vec_from(pi0fixed);
+    const std::vector<double> initpt_v = vec_from(initpt);
+    const std::vector<double> initpr_v = vec_from(initpr);
+    const std::vector<double> gridpoints_v = vec_from(gridpoints);
+    std::vector<double> grid = gridpoints_v.empty()
+                                   ? npfc::grid::gridpoints_npnorm(data, weights,
+                                                                   beta, 100)
+                                   : gridpoints_v;
+    auto init =
+        npfc::grid::initial_npnorm(data, weights, beta, initpt_v, initpr_v);
+    auto solver = std::make_unique<npfc::MixSolver>(
+        std::make_unique<npfc::fam::NpNormLLW>(data, weights, mu0fixed_v,
+                                               pi0fixed_v, beta, h),
+        mu0fixed_v, pi0fixed_v, std::get<1>(init), std::get<2>(init), grid,
+        static_cast<int>(verbose));
+    solver->computemixdist(tol, maxit);
+    return result_to_dict(solver->finish());
+}
+
+py::dict npnormllw_estpi0(py::array_t<double> data_in,
+                          py::array_t<double> weights_in, double beta, double h,
+                          double val, py::array_t<double> initpt,
+                          py::array_t<double> initpr,
+                          py::array_t<double> gridpoints, double tol,
+                          long verbose, bool fast, bool relax,
+                          double inner_tol) {
+    auto vw = sort_centers_weights(vec_from(data_in), vec_from(weights_in));
+    const std::vector<double>& data = vw.first;
+    const std::vector<double>& weights = vw.second;
+    const std::vector<double> initpt_v = vec_from(initpt);
+    const std::vector<double> initpr_v = vec_from(initpr);
+    const std::vector<double> gridpoints_v = vec_from(gridpoints);
+    std::vector<double> grid = gridpoints_v.empty()
+                                   ? npfc::grid::gridpoints_npnorm(data, weights,
+                                                                   beta, 100)
+                                   : gridpoints_v;
+    auto init =
+        npfc::grid::initial_npnorm(data, weights, beta, initpt_v, initpr_v);
+    std::vector<double> mu0f{0.0}, pi0f{1.0};
+    auto solver = std::make_unique<npfc::MixSolver>(
+        std::make_unique<npfc::fam::NpNormLLW>(data, weights, mu0f, pi0f, beta,
+                                               h),
+        mu0f, pi0f, std::get<1>(init), std::get<2>(init), grid,
+        static_cast<int>(verbose));
+    if (fast)
+        solver->estpi0_fast(val, tol, inner_tol, relax);
+    else
+        solver->estpi0(val, tol);
+    return result_to_dict(solver->finish());
+}
+
+py::dict npnormcvmw(py::array_t<double> data_in, py::array_t<double> weights_in,
+                    py::array_t<double> mu0fixed, py::array_t<double> pi0fixed,
+                    double beta, double h, py::array_t<double> initpt,
+                    py::array_t<double> initpr,
+                    py::array_t<double> gridpoints, double tol, long maxit,
+                    long verbose) {
+    auto vw = sort_centers_weights(vec_from(data_in), vec_from(weights_in));
+    const std::vector<double>& data = vw.first;
+    const std::vector<double>& weights = vw.second;
+    const std::vector<double> mu0fixed_v = vec_from(mu0fixed);
+    const std::vector<double> pi0fixed_v = vec_from(pi0fixed);
+    const std::vector<double> initpt_v = vec_from(initpt);
+    const std::vector<double> initpr_v = vec_from(initpr);
+    const std::vector<double> gridpoints_v = vec_from(gridpoints);
+    std::vector<double> grid = gridpoints_v.empty()
+                                   ? default_grid_extended_w(data, weights, beta)
+                                   : gridpoints_v;
+    auto init =
+        npfc::grid::initial_npnorm(data, weights, beta, initpt_v, initpr_v);
+    auto solver = std::make_unique<npfc::MixSolver>(
+        std::make_unique<npfc::fam::NpNormCVMW>(data, weights, mu0fixed_v,
+                                                pi0fixed_v, beta, h),
+        mu0fixed_v, pi0fixed_v, std::get<1>(init), std::get<2>(init), grid,
+        static_cast<int>(verbose));
+    solver->computemixdist(tol, maxit);
+    return result_to_dict(solver->finish());
+}
+
+py::dict npnormcvmw_estpi0(py::array_t<double> data_in,
+                           py::array_t<double> weights_in, double beta,
+                           double h, double val, py::array_t<double> initpt,
+                           py::array_t<double> initpr,
+                           py::array_t<double> gridpoints, double tol,
+                           long verbose, bool fast, bool relax,
+                           double inner_tol) {
+    auto vw = sort_centers_weights(vec_from(data_in), vec_from(weights_in));
+    const std::vector<double>& data = vw.first;
+    const std::vector<double>& weights = vw.second;
+    const std::vector<double> initpt_v = vec_from(initpt);
+    const std::vector<double> initpr_v = vec_from(initpr);
+    const std::vector<double> gridpoints_v = vec_from(gridpoints);
+    std::vector<double> grid = gridpoints_v.empty()
+                                   ? default_grid_extended_w(data, weights, beta)
+                                   : gridpoints_v;
+    auto init =
+        npfc::grid::initial_npnorm(data, weights, beta, initpt_v, initpr_v);
+    std::vector<double> mu0f{0.0}, pi0f{0.0};
+    auto solver = std::make_unique<npfc::MixSolver>(
+        std::make_unique<npfc::fam::NpNormCVMW>(data, weights, mu0f, pi0f, beta,
+                                                h),
+        mu0f, pi0f, std::get<1>(init), std::get<2>(init), grid,
+        static_cast<int>(verbose));
+    if (fast)
+        solver->estpi0_fast(val, tol, inner_tol, relax);
+    else
+        solver->estpi0(val, tol);
+    return result_to_dict(solver->finish());
+}
+
+py::dict npnormadw(py::array_t<double> data_in, py::array_t<double> weights_in,
+                   py::array_t<double> mu0fixed, py::array_t<double> pi0fixed,
+                   double beta, double h, py::array_t<double> initpt,
+                   py::array_t<double> initpr,
+                   py::array_t<double> gridpoints, double tol, long maxit,
+                   long verbose) {
+    auto vw = sort_centers_weights(vec_from(data_in), vec_from(weights_in));
+    const std::vector<double>& data = vw.first;
+    const std::vector<double>& weights = vw.second;
+    const std::vector<double> mu0fixed_v = vec_from(mu0fixed);
+    const std::vector<double> pi0fixed_v = vec_from(pi0fixed);
+    const std::vector<double> initpt_v = vec_from(initpt);
+    const std::vector<double> initpr_v = vec_from(initpr);
+    const std::vector<double> gridpoints_v = vec_from(gridpoints);
+    std::vector<double> grid = gridpoints_v.empty()
+                                   ? default_grid_extended_w(data, weights, beta)
+                                   : gridpoints_v;
+    auto init =
+        npfc::grid::initial_npnorm(data, weights, beta, initpt_v, initpr_v);
+    auto solver = std::make_unique<npfc::MixSolver>(
+        std::make_unique<npfc::fam::NpNormADW>(data, weights, mu0fixed_v,
+                                               pi0fixed_v, beta, h),
+        mu0fixed_v, pi0fixed_v, std::get<1>(init), std::get<2>(init), grid,
+        static_cast<int>(verbose));
+    solver->computemixdist(tol, maxit);
+    return result_to_dict(solver->finish());
+}
+
+py::dict npnormadw_estpi0(py::array_t<double> data_in,
+                          py::array_t<double> weights_in, double beta, double h,
+                          double val, py::array_t<double> initpt,
+                          py::array_t<double> initpr,
+                          py::array_t<double> gridpoints, double tol,
+                          long verbose, bool fast, bool relax,
+                          double inner_tol) {
+    auto vw = sort_centers_weights(vec_from(data_in), vec_from(weights_in));
+    const std::vector<double>& data = vw.first;
+    const std::vector<double>& weights = vw.second;
+    const std::vector<double> initpt_v = vec_from(initpt);
+    const std::vector<double> initpr_v = vec_from(initpr);
+    const std::vector<double> gridpoints_v = vec_from(gridpoints);
+    std::vector<double> grid = gridpoints_v.empty()
+                                   ? default_grid_extended_w(data, weights, beta)
+                                   : gridpoints_v;
+    auto init =
+        npfc::grid::initial_npnorm(data, weights, beta, initpt_v, initpr_v);
+    std::vector<double> mu0f{0.0}, pi0f{0.0};
+    auto solver = std::make_unique<npfc::MixSolver>(
+        std::make_unique<npfc::fam::NpNormADW>(data, weights, mu0f, pi0f, beta,
+                                               h),
+        mu0f, pi0f, std::get<1>(init), std::get<2>(init), grid,
+        static_cast<int>(verbose));
+    if (fast)
+        solver->estpi0_fast(val, tol, inner_tol, relax);
+    else
+        solver->estpi0(val, tol);
+    return result_to_dict(solver->finish());
+}
+
+py::dict nptllw(py::array_t<double> data_in, py::array_t<double> weights_in,
+                py::array_t<double> mu0fixed, py::array_t<double> pi0fixed,
+                double beta, double h, py::array_t<double> initpt,
+                py::array_t<double> initpr, py::array_t<double> gridpoints,
+                double tol, long maxit, long verbose) {
+    auto vw = sort_centers_weights(vec_from(data_in), vec_from(weights_in));
+    const std::vector<double>& data = vw.first;
+    const std::vector<double>& weights = vw.second;
+    const std::vector<double> mu0fixed_v = vec_from(mu0fixed);
+    const std::vector<double> pi0fixed_v = vec_from(pi0fixed);
+    const std::vector<double> initpt_v = vec_from(initpt);
+    const std::vector<double> initpr_v = vec_from(initpr);
+    const std::vector<double> gridpoints_v = vec_from(gridpoints);
+    // PIT to z-space: vz = qnorm(pt(data, df = beta)). Identity when beta = inf
+    // (the grid/init construction only; the family kernel is unchanged).
+    std::vector<double> vz(data.size());
+    for (std::size_t i = 0; i < data.size(); ++i)
+        vz[i] = npfc::stats::qnorm(npfc::stats::pt(data[i], beta, true));
+    std::vector<double> grid;
+    if (gridpoints_v.empty()) {
+        const std::vector<double> g =
+            npfc::grid::gridpoints_npnorm(vz, weights, 1.0, 100);
+        grid = g;
+        for (double& z : grid)
+            z = npfc::stats::qt(npfc::stats::pnorm(z, 0.0, 1.0, true), beta);
+    } else {
+        grid = gridpoints_v;
+    }
+    std::vector<double> initpt_z;
+    for (double x : initpt_v)
+        initpt_z.push_back(npfc::stats::qnorm(npfc::stats::pt(x, beta, true)));
+    auto init =
+        npfc::grid::initial_npnorm(vz, weights, 1.0, initpt_z, initpr_v);
+    std::vector<double> initpt_t;
+    for (double z : std::get<1>(init))
+        initpt_t.push_back(
+            npfc::stats::qt(npfc::stats::pnorm(z, 0.0, 1.0, true), beta));
+    auto solver = std::make_unique<npfc::MixSolver>(
+        std::make_unique<npfc::fam::NpTLLW>(data, weights, mu0fixed_v,
+                                            pi0fixed_v, beta, h),
+        mu0fixed_v, pi0fixed_v, std::move(initpt_t), std::get<2>(init), grid,
+        static_cast<int>(verbose));
+    solver->computemixdist(tol, maxit);
+    return result_to_dict(solver->finish());
+}
+
+py::dict nptllw_estpi0(py::array_t<double> data_in,
+                       py::array_t<double> weights_in, double beta, double h,
+                       double val, py::array_t<double> initpt,
+                       py::array_t<double> initpr,
+                       py::array_t<double> gridpoints, double tol, long verbose,
+                       bool fast, bool relax, double inner_tol) {
+    auto vw = sort_centers_weights(vec_from(data_in), vec_from(weights_in));
+    const std::vector<double>& data = vw.first;
+    const std::vector<double>& weights = vw.second;
+    const std::vector<double> initpt_v = vec_from(initpt);
+    const std::vector<double> initpr_v = vec_from(initpr);
+    const std::vector<double> gridpoints_v = vec_from(gridpoints);
+    // PIT to z-space (same transform as `nptllw`).
+    std::vector<double> vz(data.size());
+    for (std::size_t i = 0; i < data.size(); ++i)
+        vz[i] = npfc::stats::qnorm(npfc::stats::pt(data[i], beta, true));
+    std::vector<double> grid;
+    if (gridpoints_v.empty()) {
+        const std::vector<double> g =
+            npfc::grid::gridpoints_npnorm(vz, weights, 1.0, 100);
+        grid = g;
+        for (double& z : grid)
+            z = npfc::stats::qt(npfc::stats::pnorm(z, 0.0, 1.0, true), beta);
+    } else {
+        grid = gridpoints_v;
+    }
+    std::vector<double> initpt_z;
+    for (double x : initpt_v)
+        initpt_z.push_back(npfc::stats::qnorm(npfc::stats::pt(x, beta, true)));
+    auto init =
+        npfc::grid::initial_npnorm(vz, weights, 1.0, initpt_z, initpr_v);
+    std::vector<double> initpt_t;
+    for (double z : std::get<1>(init))
+        initpt_t.push_back(
+            npfc::stats::qt(npfc::stats::pnorm(z, 0.0, 1.0, true), beta));
+    std::vector<double> mu0f{0.0}, pi0f{0.0};
+    auto solver = std::make_unique<npfc::MixSolver>(
+        std::make_unique<npfc::fam::NpTLLW>(data, weights, mu0f, pi0f, beta, h),
+        mu0f, pi0f, std::move(initpt_t), std::get<2>(init), grid,
+        static_cast<int>(verbose));
+    if (fast)
+        solver->estpi0_fast(val, tol, inner_tol, relax);
+    else
+        solver->estpi0(val, tol);
+    return result_to_dict(solver->finish());
+}
+
+// ---------------------------------------------------------------------------
 // posteriormean (R utility.R): for a fitted mixing distribution
 // G = sum_j pr_j Delta_{pt_j}, the posterior mean of fun(pt) at each
 // observation x_i under the family's kernel:
@@ -602,7 +915,7 @@ PYBIND11_MODULE(_core, m) {
     m.doc() = "npfixedcomppy C++/Eigen core (pybind11)";
     // A callable, matching the PyO3 `version()` entry point the Python
     // front-end (npfc.py) expects.
-    m.def("version", [] { return std::string("0.1.0-cpp"); });
+    m.def("version", [] { return std::string("0.2.0-cpp"); });
 
     const auto guard = py::call_guard<py::gil_scoped_release>();
     const auto kw = py::kw_only();
@@ -656,6 +969,52 @@ PYBIND11_MODULE(_core, m) {
           py::arg("val"), py::arg("initpt"), py::arg("initpr"),
           py::arg("gridpoints"), py::arg("tol"), py::arg("verbose"),
           py::arg("fast"), py::arg("relax"), py::arg("inner_tol"), guard, kw);
+
+    // The four binned ("...w") computemixdist entries: the caller pre-bins
+    // the observations into (bin centres `data`, bin counts `weights`) and
+    // passes `h = 10^order`.
+    m.def("npnormllw", &npnormllw, py::arg("data"), py::arg("weights"),
+          py::arg("mu0fixed"), py::arg("pi0fixed"), py::arg("beta"),
+          py::arg("h"), py::arg("initpt"), py::arg("initpr"),
+          py::arg("gridpoints"), py::arg("tol"), py::arg("maxit"),
+          py::arg("verbose"), guard, kw);
+    m.def("npnormcvmw", &npnormcvmw, py::arg("data"), py::arg("weights"),
+          py::arg("mu0fixed"), py::arg("pi0fixed"), py::arg("beta"),
+          py::arg("h"), py::arg("initpt"), py::arg("initpr"),
+          py::arg("gridpoints"), py::arg("tol"), py::arg("maxit"),
+          py::arg("verbose"), guard, kw);
+    m.def("npnormadw", &npnormadw, py::arg("data"), py::arg("weights"),
+          py::arg("mu0fixed"), py::arg("pi0fixed"), py::arg("beta"),
+          py::arg("h"), py::arg("initpt"), py::arg("initpr"),
+          py::arg("gridpoints"), py::arg("tol"), py::arg("maxit"),
+          py::arg("verbose"), guard, kw);
+    m.def("nptllw", &nptllw, py::arg("data"), py::arg("weights"),
+          py::arg("mu0fixed"), py::arg("pi0fixed"), py::arg("beta"),
+          py::arg("h"), py::arg("initpt"), py::arg("initpr"),
+          py::arg("gridpoints"), py::arg("tol"), py::arg("maxit"),
+          py::arg("verbose"), guard, kw);
+
+    // The four binned ("...w") estpi0 entries.
+    m.def("npnormllw_estpi0", &npnormllw_estpi0, py::arg("data"),
+          py::arg("weights"), py::arg("beta"), py::arg("h"), py::arg("val"),
+          py::arg("initpt"), py::arg("initpr"), py::arg("gridpoints"),
+          py::arg("tol"), py::arg("verbose"), py::arg("fast"),
+          py::arg("relax"), py::arg("inner_tol"), guard, kw);
+    m.def("npnormcvmw_estpi0", &npnormcvmw_estpi0, py::arg("data"),
+          py::arg("weights"), py::arg("beta"), py::arg("h"), py::arg("val"),
+          py::arg("initpt"), py::arg("initpr"), py::arg("gridpoints"),
+          py::arg("tol"), py::arg("verbose"), py::arg("fast"),
+          py::arg("relax"), py::arg("inner_tol"), guard, kw);
+    m.def("npnormadw_estpi0", &npnormadw_estpi0, py::arg("data"),
+          py::arg("weights"), py::arg("beta"), py::arg("h"), py::arg("val"),
+          py::arg("initpt"), py::arg("initpr"), py::arg("gridpoints"),
+          py::arg("tol"), py::arg("verbose"), py::arg("fast"),
+          py::arg("relax"), py::arg("inner_tol"), guard, kw);
+    m.def("nptllw_estpi0", &nptllw_estpi0, py::arg("data"),
+          py::arg("weights"), py::arg("beta"), py::arg("h"), py::arg("val"),
+          py::arg("initpt"), py::arg("initpr"), py::arg("gridpoints"),
+          py::arg("tol"), py::arg("verbose"), py::arg("fast"),
+          py::arg("relax"), py::arg("inner_tol"), guard, kw);
 
     m.def("posteriormean", &posteriormean, py::arg("family"),
           py::arg("x"), py::arg("pt"), py::arg("pr"), py::arg("beta"),

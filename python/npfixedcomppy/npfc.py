@@ -40,9 +40,19 @@ Implemented families (the ``method`` argument)
 +-------------+----------------------------------------------------------+
 | ``nppoisll``| Poisson kernel; maximum likelihood (count data)          |
 +-------------+----------------------------------------------------------+
+| ``npnormllw``| binned normal kernel (grid ``h = 10**order``); maximum |
+|             | likelihood                                               |
++-------------+----------------------------------------------------------+
+| ``npnormcvmw``| binned normal kernel; Cramer-von Mises distance        |
++-------------+----------------------------------------------------------+
+| ``npnormadw``| binned normal kernel; Anderson-Darling distance         |
++-------------+----------------------------------------------------------+
+| ``nptllw``   | binned non-central-t kernel; maximum likelihood          |
++-------------+----------------------------------------------------------+
 
-The binned (``"...w"``, ``order = -k``) variants from the R package are
-not ported yet.
+The binned (``"...w"``) families pre-bin the observations onto the grid
+``h = 10**order`` (default ``order = -3``, round-down, as in R's ``bin``)
+and fit the binned kernel; see :func:`computemixdist`.
 """
 
 from __future__ import annotations
@@ -145,12 +155,34 @@ def _to_vec(x: Optional[Sequence[float]]) -> np.ndarray:
     return np.ascontiguousarray(x, dtype=float).ravel()
 
 
+def _bin(data: np.ndarray, order: int):
+    """R's ``bin(data, order)``: round observations down to the fixed grid
+    ``..., -h, 0, h, ...`` with ``h = 10^order`` and count the (non-empty)
+    bins.
+
+    Returns ``(v, w, h)``: the bin representatives (centres, ascending),
+    the integer counts per bin (as floats, aligned with ``v``), and ``h``.
+    This is exactly the pre-binning the R ``computemixdist.<method>w`` /
+    ``estpi0.<method>w`` wrappers do before calling the C++ binned
+    families, so the Python front-end mirrors it in one place.
+    """
+    h = 10.0 ** order
+    b = np.floor(data / h)
+    rng = b - b.min()
+    t = np.bincount(rng.astype(np.int64))
+    idx = np.nonzero(t)[0]
+    v = h * (b.min() + idx)
+    w = t[idx].astype(float)
+    return v, w, h
+
+
 def computemixdist(
     v: Sequence[float],
     method: str = "npnormll",
     mu0=None,
     pi0=None,
     beta: Optional[float] = None,
+    order: int = -3,
     mix: Optional[dict] = None,
     gridpoints: Optional[Sequence[float]] = None,
     tol: float = 1e-6,
@@ -204,6 +236,11 @@ def computemixdist(
         and ``"nppoisll"``, ``inf`` for ``"nptll"`` (the normal limit).
         For ``"npnormcll"`` it is required (the number of observations) and
         a ``ValueError`` is raised when omitted.
+    order : int, default ``-3``
+        Binning level for the binned (``"...w"``) families only. The
+        observations are pre-binned onto the grid ``h = 10^order``
+        (round-down, as in R's ``bin``); ``-3`` is the R default. Ignored
+        by the un-binned families.
     mix : dict, optional
         An initial mixing distribution ``{"pt": [...], "pr": [...]}`` for
         the non-fixed part. If omitted it is derived from a histogram of
@@ -273,11 +310,23 @@ def computemixdist(
     mix_pt, mix_pr = (
         (_to_vec(mix["pt"]), _to_vec(mix["pr"])) if mix is not None else (np.empty(0), np.empty(0))
     )
-    fn = getattr(_core, method)
-    res = fn(
-        data, mu0f, pi0f, float(beta), mix_pt, mix_pr, gp,
-        float(tol), int(maxit), int(verbose),
-    )
+    spec = FAMILIES[method]
+    if spec.is_w:
+        # Binned family: pre-bin the observations exactly as the R
+        # `bin(v, order)` wrapper does, then pass (bin centres, bin counts)
+        # and `h = 10^order` to the C++ binned entry point.
+        vbin, wbin, h = _bin(data, int(order))
+        fn = getattr(_core, method)
+        res = fn(
+            vbin, wbin, mu0f, pi0f, float(beta), float(h), mix_pt, mix_pr, gp,
+            float(tol), int(maxit), int(verbose),
+        )
+    else:
+        fn = getattr(_core, method)
+        res = fn(
+            data, mu0f, pi0f, float(beta), mix_pt, mix_pr, gp,
+            float(tol), int(maxit), int(verbose),
+        )
     return _to_npmix(res)
 
 
@@ -286,6 +335,7 @@ def estpi0(
     method: str = "npnormll",
     beta: Optional[float] = None,
     val: Optional[float] = None,
+    order: int = -3,
     mix: Optional[dict] = None,
     gridpoints: Optional[Sequence[float]] = None,
     tol: float = 1e-6,
@@ -322,6 +372,9 @@ def estpi0(
         the likelihood families (``"npnormll"``, ``"nptll"``,
         ``"npnormcll"``, ``"nppoisll"``), ``0.1`` for ``"npnormcvm"`` and
         ``1`` for ``"npnormad"``.
+    order : int, default ``-3``
+        Binning level for the binned (``"...w"``) families only (as in
+        :func:`computemixdist`). Ignored by the un-binned families.
     mix : dict, optional
         Initial mixing distribution (as in :func:`computemixdist`).
     gridpoints : array_like of float, optional
@@ -385,10 +438,17 @@ def estpi0(
     mix_pt, mix_pr = (
         (_to_vec(mix["pt"]), _to_vec(mix["pr"])) if mix is not None else (np.empty(0), np.empty(0))
     )
+    val = 2.0 if val is None else val
     fn = getattr(_core, f"{method}_estpi0")
-    res = fn(data, float(beta), val if val is not None else 2.0,
-             mix_pt, mix_pr, gp, float(tol), int(verbose),
-             bool(fast), bool(relax), float(inner_tol))
+    if FAMILIES[method].is_w:
+        vbin, wbin, h = _bin(data, int(order))
+        res = fn(vbin, wbin, float(beta), float(h), val,
+                 mix_pt, mix_pr, gp, float(tol), int(verbose),
+                 bool(fast), bool(relax), float(inner_tol))
+    else:
+        res = fn(data, float(beta), val,
+                 mix_pt, mix_pr, gp, float(tol), int(verbose),
+                 bool(fast), bool(relax), float(inner_tol))
     return _to_npmix(res)
 
 
@@ -693,11 +753,16 @@ class _FamilySpec:
     needs_beta : bool
         If ``True``, an explicit ``beta`` is mandatory and a missing one
         raises ``ValueError`` (currently only ``"npnormcll"``).
+    is_w : bool
+        If ``True`` this is a binned ("``...w``") family: the observations
+        are pre-binned (``order``) into bin centres/counts and the C++
+        binned entry point is called with ``h = 10^order``.
     """
 
-    def __init__(self, default_beta: float, needs_beta: bool):
+    def __init__(self, default_beta: float, needs_beta: bool, is_w: bool = False):
         self.default_beta = default_beta
         self.needs_beta = needs_beta
+        self.is_w = is_w
 
 
 #: Implemented families: ``method`` name -> :class:`_FamilySpec`.
@@ -718,6 +783,14 @@ class _FamilySpec:
 #: +-------------+--------------+-------------------------------+
 #: | ``nppoisll`` | ``1.0``      | Poisson scale                 |
 #: +-------------+--------------+-------------------------------+
+#: | ``npnormllw``| ``1.0``      | normal scale (binned)         |
+#: +-------------+--------------+-------------------------------+
+#: | ``npnormcvmw``| ``1.0``    | normal scale (binned)         |
+#: +-------------+--------------+-------------------------------+
+#: | ``npnormadw``| ``1.0``      | normal scale (binned)         |
+#: +-------------+--------------+-------------------------------+
+#: | ``nptllw``   | ``inf``      | t degrees of freedom (binned) |
+#: +-------------+--------------+-------------------------------+
 FAMILIES = {
     "npnormll": _FamilySpec(1.0, False),
     "npnormcvm": _FamilySpec(1.0, False),
@@ -725,4 +798,9 @@ FAMILIES = {
     "nptll": _FamilySpec(float("inf"), False),
     "npnormcll": _FamilySpec(0.0, True),   # user must supply beta
     "nppoisll": _FamilySpec(1.0, False),
+    # binned ("...w") families: observations pre-binned with `order`.
+    "npnormllw": _FamilySpec(1.0, False, True),
+    "npnormcvmw": _FamilySpec(1.0, False, True),
+    "npnormadw": _FamilySpec(1.0, False, True),
+    "nptllw": _FamilySpec(float("inf"), False, True),
 }

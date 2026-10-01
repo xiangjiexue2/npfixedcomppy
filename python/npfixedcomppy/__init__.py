@@ -12,8 +12,7 @@ package to working precision for the families below. There are no
 hand-written OpenMP loops: at build time ``setup.py`` detects whether the
 compiler supports the OpenMP flag and, if so, enables Eigen's own
 compile-time-parallel GEMM/GEMV through that flag alone (otherwise the
-build is serial Eigen). Identical inputs always produce identical
-outputs.
+build is serial Eigen).
 
 Public API
 ----------
@@ -42,9 +41,19 @@ Implemented families (``method`` argument)
 +-------------+-------------------------------------------------+
 | ``nppoisll``| Poisson kernel; MLE (count data)                |
 +-------------+-------------------------------------------------+
+| ``npnormllw``| normal kernel; MLE (binned, ``order = -k``)   |
++-------------+-------------------------------------------------+
+| ``npnormcvmw``| normal kernel; Cramér–von Mises (binned)      |
++-------------+-------------------------------------------------+
+| ``npnormadw``| normal kernel; Anderson–Darling (binned)      |
++-------------+-------------------------------------------------+
+| ``nptllw``   | non-central-t kernel; MLE (binned)             |
++-------------+-------------------------------------------------+
 
-The binned ("``w``", ``order = -k``) variants from the R package are not
-ported yet.
+The binned (``"...w"``, ``order = -k``) families pre-bin the observations
+onto the grid ``h = 10^order`` (round-down, as in the R ``bin``) and are
+intended for large samples; see ``computemixdist`` / ``estpi0`` (the
+``order`` argument).
 """
 
 from npfixedcomppy.npfc import (  # noqa: F401
