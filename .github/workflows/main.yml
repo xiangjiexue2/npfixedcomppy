@@ -2,7 +2,7 @@ name: Build wheels
 on:
   push:
     tags:
-      - 'v*'
+      - '*.*.*'
   workflow_dispatch:
 
 jobs:
@@ -15,9 +15,13 @@ jobs:
           - ubuntu-latest
           - macos-14
           - windows-latest
-
     steps:
       - uses: actions/checkout@v4
+
+      # QEMU 用于交叉编译 Linux aarch64
+      - name: Set up QEMU
+        if: matrix.runner == 'ubuntu-latest'
+        uses: docker/setup-qemu-action@v3
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -34,30 +38,42 @@ jobs:
         env:
           CIBW_PYTHON_VERSIONS: "3.10 3.11 3.12 3.13 3.14"
           CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
-          CIBW_SKIP: ""
+          CIBW_ARCHS_LINUX: "x86_64 aarch64"
+          CIBW_ARCHS_MACOS: "arm64 x86_64"
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux2014
+          CIBW_MUSLLINUX_X86_64_IMAGE: musllinux_1_2
+          CIBW_MUSLLINUX_AARCH64_IMAGE: musllinux_1_2
           CIBW_MACOS_DEPLOYMENT_TARGET: "10.15"
+          CIBW_TEST_SKIP: "*-musllinux_aarch64"
+
+      - name: Build sdist source package
+        run: |
+          pip install build
+          python -m build --sdist --outdir wheelhouse
 
       - name: Upload wheel artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: built-wheels
           path: ./wheelhouse/*.whl
+          retention-days: 14
 
   upload-release:
     needs: build-wheels
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # 正则校验tag：仅匹配纯三段数字版本号 x.y.z，拒绝 v0.1.2、abc.1.2、1.2
+    if: github.ref_type == 'tag' && github.ref =~ /^refs\/tags\/[0-9]+\.[0-9]+\.[0-9]+$/
     steps:
       - name: Download built wheels
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: built-wheels
           path: ./wheels
 
       - name: Create Github Release & attach wheels
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
-          files: ./wheels/*.whl
+          files: ./wheels/*

@@ -1,0 +1,64 @@
+python: C:\Users\xxjie\Documents\rebuild\npfixedcomppy\.venv\Scripts\python.exe
+tests : verify_2d_same.py, verify_binned.py, verify_coveb.py, verify_cvmadcll.py, verify_density.py, verify_kernels.py, verify_npnormll.py, verify_nptll.py, verify_pois.py, verify_posteriormean.py
+
+===== verify_2d_same.py  exit=0  OK
+  [OK ] self-consistency: ll=848.747282034907 vs recomputed 848.7472820349071
+  [OK ] kernel@R-pts: PY kernel at R's points: ll=848.8877528768896 (R 848.8877528768899)
+  [OK ] no-worse-than-R: PY ll=848.747282034907 <= R ll=848.8877528768899
+TOTAL BAD: 0
+
+===== verify_binned.py  exit=0  OK
+  [OK ] TLLW-rerun: nptllw deterministic re-run bit-identical
+  [OK ] LLW_FIX-rerun: npnormllw(fixed) deterministic re-run bit-identical
+
+TOTAL BAD: 0
+
+===== verify_coveb.py  exit=0  OK
+  [OK ] C corr-PSD: min eigval = 3.747e-01
+  [OK ] C diag~var: diag should equal sample variance
+
+TOTAL BAD: 0
+
+===== verify_cvmadcll.py  exit=0  OK
+  [OK ] CLL-rerun: CLL mix deterministic re-run bit-identical
+  [OK ] EP_CLL-rerun: estpi0 CLL deterministic re-run bit-identical
+
+TOTAL BAD: 0
+
+===== verify_density.py  exit=0  OK
+[i  ] vs this R ref: max|dD|=3.513e-04  maxrel=1.017e-02
+         pt=[0, 0.0555487, 2.04558]  iter=15
+
+TOTAL BAD: 0
+
+===== verify_kernels.py  exit=0  OK
+dnppois_l            20     7    4.441e-16    2.043e-16
+pnpt_llt             40     0    8.882e-15    8.570e-15
+pnpdiscnorm_llt      40    23    2.220e-16    9.492e-15
+TOTAL BAD: 0
+
+===== verify_npnormll.py  exit=0  OK
+  [OK ] deterministic re-run CM: ll/pt/pr bit-identical
+  [OK ] deterministic re-run EP: ll/pt/pr bit-identical
+
+TOTAL BAD: 0
+
+===== verify_nptll.py  exit=0  OK
+  [OK ] iter=4 (ref 4)  [OK ] conv=0 (ref 0)
+  [OK ] family=npt flag=d0
+
+TOTAL BAD: 0
+
+===== verify_pois.py  exit=0  OK
+  [OK ] CM-rerun: CM deterministic re-run bit-identical
+  [OK ] EP-rerun: EP deterministic re-run bit-identical
+
+TOTAL BAD: 0
+
+===== verify_posteriormean.py  exit=0  OK
+  [OK ] determinism: bit-identical re-run
+  [OK ] monotonicity: identity posterior mean non-decreasing
+
+TOTAL BAD: 0
+
+ALL PASS

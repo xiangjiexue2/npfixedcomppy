@@ -268,6 +268,11 @@ inline std::vector<double> pnpnorm(const std::vector<double>& x,
 // `dnormcarray(x, mu, n)` (non-log) for a single support point.
 inline double dnpnormc_single(double x, double mu, double n) {
     const double stdev = (1.0 - mu * mu) / std::sqrt(n);
+    // |mu| >= 1 puts the 1-parameter normal out of its domain: R's
+    // `dnormcarray` evaluates the expression and propagates NaN (log of a
+    // non-positive stdev); mirror that instead of computing a value.
+    if (!isfinite(stdev) || stdev <= 0.0)
+        return nanv();
     const double d = (x - mu) / stdev;
     return std::exp(-0.5 * d * d - stats::LN_SQRT_2PI - std::log(stdev));
 }
@@ -440,7 +445,11 @@ inline double pnorm_log(double x, double mu, double sd, bool lower_tail) {
     const double y = std::fabs(p);
     const double eps = DBL_EPSILON * 0.5;
     constexpr double M_SQRT_32 = 5.6568542494923802;  // sqrt(32)
-    constexpr double M_1_SQRT_2PI = 0.7978845608028654;
+    // 1/sqrt(2*pi) — R's pnorm.c `M_1_SQRT_2PI` (NOT sqrt(2/pi)). The CF tail
+    // term is `(1/sqrt(2pi) - temp)/y`; a value 2x too large shifts the far
+    // tail (|z| > sqrt(32)) by exactly a factor 2 in the probability, i.e.
+    // ln 2 in log space.
+    constexpr double M_1_SQRT_2PI = 0.3989422804014327;
     constexpr double a[5] = {2.2352520354606839287, 161.02823106855587881,
                              1067.6894854603709582, 18154.981253343561249,
                              0.065682337918207449113};
@@ -879,6 +888,517 @@ inline Eigen::MatrixXd ptarray_log(const std::vector<double>& x,
                                 for (std::size_t j = 0; j < m; ++j)
                                     row[j] = pnt_log(x[i], df, mu0[j], true);
                             });
+}
+
+// ---------------------------------------------------------------------------
+// multivariate (N-d) normal density (port of the R package's densityND.h
+// `dnormNDarray` / `dnpnormND_`; the R `lg`/non-log conventions kept).
+//
+// `x` is n x dim, `mu0` is m x dim (support points), `Sigma` is the dim x dim
+// covariance. The log-space path returns the log of the (already summed)
+// mixture density, mirroring the R reference.
+// ---------------------------------------------------------------------------
+
+// (n x m) column-major multivariate-normal pdf, at each (data point i,
+// support point j). `lg = true` returns the log-density, else the density.
+inline Eigen::MatrixXd dnormNDarray(const Eigen::MatrixXd& x,
+                                    const Eigen::MatrixXd& mu0,
+                                    const Eigen::MatrixXd& Sigma, bool lg) {
+    const Eigen::Index n = x.rows();
+    const Eigen::Index m = mu0.rows();
+    const Eigen::Index dim = x.cols();
+    // Mirror the R reference (densityND.h) exactly: the quadratic form is the
+    // Cholesky solve `dec.solve(d).dot(d)`, and the normalizing constant keeps
+    // R's grouping `LN_SQRT_2PI * dim + 0.5 * log(det)`. The mathematically
+    // identical `0.5 * (dim * LN_2PI + log det)` differs by a few ULP, which is
+    // enough to flip a near-zero per-cell objective sign in the 2D new-point
+    // search (and hence the whole MLE trajectory), so R's exact grouping is
+    // required, not just the value.
+    const double logdet = std::log(Sigma.determinant());
+    const double base = stats::LN_SQRT_2PI * dim + 0.5 * logdet;
+    Eigen::MatrixXd ans(n, m);
+    if (dim == 2) {
+        // Fast path for the 2-D family (the only `dim == 2` caller is the
+        // npnorm2Dll objective, called ~10^5-10^6 times). The quadratic form
+        // is the Cholesky forward substitution `dec.solve(d).dot(d)` with the
+        // factors taken from Eigen's own LLT of `Sigma` — the same factors
+        // and the same operation order as the generic path below, unrolled to
+        // scalars so no per-point Eigen call or temporary remains. The
+        // previous per-point `dec.solve(d)` (even with compile-time-2 types)
+        // kept the 2D objective several times slower per eval than the
+        // identical R source tree; this matches its ~6 flops/point.
+        // Hand-unrolled 2x2 Cholesky with the SAME factor values and the
+        // SAME per-point operation sequence as the generic path below:
+        // for size < 32 Eigen's LLT runs `unblocked` — l11 = sqrt(S00),
+        // l21 = S10 / l11, l22 = sqrt(S11 - l21^2) — and `dec.solve(d)` is
+        // the two-stage triangular solve (forward with L, backward with
+        // L^T) dotted with d. The previous per-point `dec.solve(d)` call
+        // kept this objective several times slower per eval than the
+        // identical R source tree (per-point Eigen template machinery);
+        // the unrolled form is ~12 flops + 4 divides per point, no
+        // temporaries, same values.
+        const double l11 = std::sqrt(Sigma(0, 0));
+        const double l21 = Sigma(1, 0) / l11;
+        const double l22 = std::sqrt(Sigma(1, 1) - l21 * l21);
+        for (Eigen::Index j = 0; j < m; ++j) {
+            const double mj0 = mu0(j, 0);
+            const double mj1 = mu0(j, 1);
+            for (Eigen::Index i = 0; i < n; ++i) {
+                const double d0 = x(i, 0) - mj0;
+                const double d1 = x(i, 1) - mj1;
+                const double v0 = d0 / l11;
+                const double v1 = (d1 - l21 * v0) / l22;
+                const double y1 = v1 / l22;
+                const double y0 = (v0 - l21 * y1) / l11;
+                ans(i, j) = -0.5 * (y0 * d0 + y1 * d1) - base;
+            }
+        }
+    } else {
+        const Eigen::LLT<Eigen::MatrixXd> dec(Sigma);
+        for (Eigen::Index j = 0; j < m; ++j) {
+            for (Eigen::Index i = 0; i < n; ++i) {
+                const Eigen::VectorXd d = x.row(i).transpose() - mu0.row(j).transpose();
+                const double quad = dec.solve(d).dot(d);
+                ans(i, j) = -0.5 * quad - base;
+            }
+        }
+    }
+    return lg ? ans : ans.array().exp();
+}
+
+// ---------------------------------------------------------------------------
+// 1D public `dnp*` / `pnp*` wrappers (R `dnpnorm_`, `pnpnorm_`, `dnpnormc_`,
+// `dnpt_`, `pnpt_`, `dnpdiscnorm_`, `pnpdiscnorm_`, `dnppois_`, `pnppois_`,
+// `dnpdisct_`).
+//
+// R has two exact code paths per wrapper, and the public wrapper must
+// reproduce BOTH (not just the non-log one the engine uses internally):
+//   lg = FALSE :  out[i] = sum_j K(i, j) * pi0[j]      (R's `M %*% pi0`)
+//   lg = TRUE  :  out[i] = logspaceadd( ... logspaceadd(
+//                          logK(i, 0) + log pi0[0], logK(i, 1) + log pi0[1]
+//                          ), ... )                    (R's sequential chain)
+// The two are mathematically identical; the lg path matters for the public
+// API (the engine only calls the lg=FALSE forms). The log-space kernels below
+// return `log K(i, j)`; `log_mix` runs the exact R accumulation. A
+// `pi0[j] <= 0` term contributes `-1e100` in log space (R's guard).
+// ---------------------------------------------------------------------------
+
+// log of the normal pdf kernel (n x m column-major): `log N(x[i]; mu0[j], b)`.
+inline Eigen::MatrixXd kmat_norm_log(const std::vector<double>& x,
+                                     const std::vector<double>& mu0,
+                                     double beta) {
+    const std::size_t n = x.size();
+    const std::size_t m = mu0.size();
+    std::vector<double> raw(n * m, 0.0);
+    const double b2 = beta * beta;
+    const double base = stats::LN_SQRT_2PI + std::log(beta);
+    for (std::size_t j = 0; j < m; ++j) {
+        const double mu = mu0[j];
+        double* col = raw.data() + j * n;
+        for (std::size_t i = 0; i < n; ++i) {
+            const double d = x[i] - mu;
+            col[i] = d * d / (-2.0 * b2) - base;
+        }
+    }
+    return Eigen::Map<Eigen::MatrixXd>(raw.data(), n, m);
+}
+
+// log of the normal-cdf kernel (n x m column-major): `log pnorm(x[i]; mu0[j],
+// beta, lt)` in R's Cody log branch (`pnorm_log`).
+inline Eigen::MatrixXd kmat_pnorm_log(const std::vector<double>& x,
+                                      const std::vector<double>& mu0,
+                                      double beta, bool lower_tail) {
+    const std::size_t n = x.size();
+    const std::size_t m = mu0.size();
+    std::vector<double> raw(n * m, 0.0);
+    for (std::size_t j = 0; j < m; ++j) {
+        const double mu = mu0[j];
+        double* col = raw.data() + j * n;
+        for (std::size_t i = 0; i < n; ++i)
+            col[i] = pnorm_log(x[i], mu, beta, lower_tail);
+    }
+    return Eigen::Map<Eigen::MatrixXd>(raw.data(), n, m);
+}
+
+// log of the one-parameter-normal pdf kernel (n x m column-major).
+inline Eigen::MatrixXd kmat_normc_log(const std::vector<double>& x,
+                                      const std::vector<double>& mu0,
+                                      double n) {
+    const std::size_t m = mu0.size();
+    return bfill::fill(x.size(), m, [&x, &mu0, m, n](std::size_t i, double* row) {
+        for (std::size_t j = 0; j < m; ++j)
+            row[j] = std::log(dnpnormc_single(x[i], mu0[j], n));
+    });
+}
+
+// log of the non-central-t pdf kernel (n x m column-major).
+inline Eigen::MatrixXd kmat_t_log(const std::vector<double>& x,
+                                  const std::vector<double>& mu0, double df) {
+    const std::size_t m = mu0.size();
+    return bfill::fill(x.size(), m, [&x, &mu0, m, df](std::size_t i, double* row) {
+        for (std::size_t j = 0; j < m; ++j)
+            row[j] = std::log(stats::dnt(x[i], df, mu0[j]));
+    });
+}
+
+// log of the non-central-t cdf kernel (n x m column-major), R's `pnt_functor`
+// log route (`pnt_log`).
+inline Eigen::MatrixXd kmat_pnt_log(const std::vector<double>& x,
+                                    const std::vector<double>& mu0, double df,
+                                    bool lower_tail) {
+    const std::size_t m = mu0.size();
+    return bfill::fill(x.size(), m, [&x, &mu0, m, df, lower_tail](std::size_t i, double* row) {
+        for (std::size_t j = 0; j < m; ++j)
+            row[j] = pnt_log(x[i], df, mu0[j], lower_tail);
+    });
+}
+
+// log of the binned-normal cdf kernel (n x m column-major): R's
+// `pdiscnormarray(lg = TRUE)` is a single shifted pnorm —
+// `log pnorm(x; mu0 - h, stdev, lt)` (shift in mu when `n > m`), else
+// `log pnorm(x + h; mu0, stdev, lt)` (shift in x). The size branch is
+// mirrored exactly (the two forms are mathematically identical but not
+// bit-for-bit). This is the CDF (a shifted pnorm), not the cdf-difference
+// density (that is `ddiscnorm_log`).
+inline Eigen::MatrixXd pdiscnorm_log(const std::vector<double>& x,
+                                     const std::vector<double>& mu0,
+                                     double beta, double h, bool lower_tail) {
+    const std::size_t n = x.size();
+    const std::size_t m = mu0.size();
+    const bool shift_mu = (m == 1) || (n > m);
+    std::vector<double> raw(n * m, 0.0);
+    for (std::size_t j = 0; j < m; ++j) {
+        double* col = raw.data() + j * n;
+        const double mu = mu0[j];
+        for (std::size_t i = 0; i < n; ++i)
+            col[i] = pnorm_log(shift_mu ? x[i] : x[i] + h,
+                               shift_mu ? mu - h : mu, beta, lower_tail);
+    }
+    return Eigen::Map<Eigen::MatrixXd>(raw.data(), n, m);
+}
+
+// log of the binned-normal pdf kernel (n x m column-major), R's
+// `ddiscnormarray(lg = TRUE)`: `logspacesub( pnorm(x; mu0 - h), pnorm(x; mu0) )`
+// (R's log branch uses exactly this form, no size branch); the trapezoid
+// non-log form is `ddiscnorm_m` above (the two coincide to ~1e-15, the
+// documented accuracy band of the binned density).
+inline Eigen::MatrixXd ddiscnorm_log(const std::vector<double>& x,
+                                     const std::vector<double>& mu0,
+                                     double beta, double h) {
+    const std::size_t n = x.size();
+    const std::size_t m = mu0.size();
+    std::vector<double> raw(n * m, 0.0);
+    for (std::size_t j = 0; j < m; ++j) {
+        double* col = raw.data() + j * n;
+        const double mu = mu0[j];
+        for (std::size_t i = 0; i < n; ++i)
+            col[i] = stats::logspacesub(pnorm_log(x[i], mu - h, beta, true),
+                                        pnorm_log(x[i], mu, beta, true));
+    }
+    return Eigen::Map<Eigen::MatrixXd>(raw.data(), n, m);
+}
+
+// log of the Poisson pmf kernel (n x m column-major), R's
+// `dpoisarray(lg = TRUE)`: the else-branch `x + mu <= 0` is `0` there (R
+// selects the literal 0 in log space, i.e. the non-log value 1, the Poisson
+// limit at `mu -> 0`). Note: only used on the engine's internal path; the
+// public wrapper's lg chain uses the scalar form in `dnppois_` (with R's
+// normal-term bug) instead.
+inline Eigen::MatrixXd kmat_pois_log(const std::vector<double>& x,
+                                     const std::vector<double>& mu0) {
+    const std::size_t n = x.size();
+    const std::size_t m = mu0.size();
+    std::vector<double> raw(n * m, 0.0);
+    for (std::size_t j = 0; j < m; ++j) {
+        const double mu = mu0[j];
+        double* col = raw.data() + j * n;
+        for (std::size_t i = 0; i < n; ++i)
+            col[i] = (x[i] + mu > 0.0)
+                         ? x[i] * std::log(mu) - mu - stats::gammln(x[i] + 1.0)
+                         : 0.0;
+    }
+    return Eigen::Map<Eigen::MatrixXd>(raw.data(), n, m);
+}
+
+// log of the Poisson cdf kernel (n x m column-major),
+// `log ppois(x[i]; mu0[j], lt)` — exactly R's `Rf_ppois(log.p = TRUE)`:
+// `x < 0 -> log 0 = -Inf` (lower.tail) / `log 1 = 0` (upper.tail), otherwise
+// `floor(x + 1e-7)` (R's non-integer rounding) and
+// `pgamma(lambda, shape = lambda, rate = floor(x) + 1, lower.tail = !lt)`
+// via `stats::pgamma_log` (R's log branch).
+inline Eigen::MatrixXd kmat_ppois_log(const std::vector<double>& x,
+                                      const std::vector<double>& mu0,
+                                      bool lower_tail) {
+    const std::size_t n = x.size();
+    const std::size_t m = mu0.size();
+    std::vector<double> raw(n * m, 0.0);
+    for (std::size_t j = 0; j < m; ++j) {
+        const double lambda = mu0[j];
+        double* col = raw.data() + j * n;
+        for (std::size_t i = 0; i < n; ++i) {
+            if (x[i] < 0.0) {
+                col[i] = lower_tail
+                             ? -std::numeric_limits<double>::infinity()
+                             : 0.0;
+            } else {
+                const double xf = std::floor(x[i] + 1e-7);
+                col[i] = stats::pgamma_log(lambda, xf + 1.0, !lower_tail);
+            }
+        }
+    }
+    return Eigen::Map<Eigen::MatrixXd>(raw.data(), n, m);
+}
+
+// log of the binned non-central-t pdf kernel (n x m column-major), R's
+// `ddisctarray(lg = TRUE)`.
+inline Eigen::MatrixXd ddisct_log(const std::vector<double>& x,
+                                  const std::vector<double>& mu0, double df,
+                                  double h) {
+    const std::size_t m = mu0.size();
+    return bfill::fill(x.size(), m, [&x, &mu0, m, df, h](std::size_t i, double* row) {
+        for (std::size_t j = 0; j < m; ++j) {
+            double l = stats::logspacesub(pnt_log(x[i] + h, df, mu0[j], true),
+                                          pnt_log(x[i], df, mu0[j], true));
+            if (std::isnan(l))
+                l = -100.0;
+            row[j] = l;
+        }
+    });
+}
+
+// R's public-wrapper log-space mixture: the sequential `logspaceadd` chain
+// over `logK(i, j) + log pi0[j]`. `pi0[j] <= 0` contributes `-1e100`.
+inline std::vector<double> log_mix(const Eigen::MatrixXd& lk,
+                                   const std::vector<double>& pi0) {
+    const Eigen::Index n = lk.rows();
+    const Eigen::Index m = lk.cols();
+    std::vector<double> out(n, 0.0);
+    for (Eigen::Index i = 0; i < n; ++i) {
+        double acc = (pi0[0] > 0.0)
+                         ? lk(i, 0) + std::log(pi0[0])
+                         : (-1.0e100);
+        for (Eigen::Index j = 1; j < m; ++j) {
+            const double t = (pi0[j] > 0.0)
+                                 ? lk(i, j) + std::log(pi0[j])
+                                 : (-1.0e100);
+            acc = stats::logspaceadd(acc, t);
+        }
+        out[static_cast<std::size_t>(i)] = acc;
+    }
+    return out;
+}
+
+// `dnpnorm_` (public, both lg paths).
+inline std::vector<double> dnpnorm_(const std::vector<double>& x,
+                                    const std::vector<double>& mu0,
+                                    const std::vector<double>& pi0, double b,
+                                    bool lg) {
+    if (mu0.empty())
+        return std::vector<double>(x.size(), lg ? -1.0e100 : 0.0);
+    if (!lg)
+        return kern::dnpnorm(x, mu0, pi0, b);
+    return log_mix(kern::kmat_norm_log(x, mu0, b), pi0);
+}
+
+// `pnpnorm_` (public, both lg paths; `lt` = lower.tail).
+inline std::vector<double> pnpnorm_(const std::vector<double>& x,
+                                    const std::vector<double>& mu0,
+                                    const std::vector<double>& pi0, double b,
+                                    bool lt, bool lg) {
+    if (mu0.empty())
+        return std::vector<double>(x.size(), lg ? -1.0e100 : 0.0);
+    if (!lg) {
+        // R's `pnpnorm_` non-log path is `pnormarray(x, mu0, stdev, lt,
+        // false) %*% pi0` — the per-`lt` CDF summed over components.
+        // (`kern::pnpnorm` hard-codes the lower tail, so it cannot be
+        // reused here for `lt = false`.)
+        const std::size_t nn = x.size();
+        const std::size_t mm = mu0.size();
+        std::vector<double> out(nn, 0.0);
+        for (std::size_t i = 0; i < nn; ++i) {
+            double s = 0.0;
+            for (std::size_t j = 0; j < mm; ++j)
+                s += stats::pnorm(x[i], mu0[j], b, lt) * pi0[j];
+            out[i] = s;
+        }
+        return out;
+    }
+    return log_mix(kern::kmat_pnorm_log(x, mu0, b, lt), pi0);
+}
+
+// `dnpnormc_` (public, both lg paths).
+inline std::vector<double> dnpnormc_(const std::vector<double>& x,
+                                     const std::vector<double>& mu0,
+                                     const std::vector<double>& pi0, double n,
+                                     bool lg) {
+    if (mu0.empty())
+        return std::vector<double>(x.size(), lg ? -1.0e100 : 0.0);
+    if (!lg)
+        return kern::dnpnormc(x, mu0, pi0, n);
+    return log_mix(kern::kmat_normc_log(x, mu0, n), pi0);
+}
+
+// `dnpt_` (public, both lg paths).
+inline std::vector<double> dnpt_(const std::vector<double>& x,
+                                 const std::vector<double>& mu0,
+                                 const std::vector<double>& pi0, double df,
+                                 bool lg) {
+    if (mu0.empty())
+        return std::vector<double>(x.size(), lg ? -1.0e100 : 0.0);
+    if (!lg)
+        return kern::dnpt(x, mu0, pi0, df);
+    return log_mix(kern::kmat_t_log(x, mu0, df), pi0);
+}
+
+// `pnpt_` (public, both lg paths; `lt` = lower.tail).
+inline std::vector<double> pnpt_(const std::vector<double>& x,
+                                 const std::vector<double>& mu0,
+                                 const std::vector<double>& pi0, double df,
+                                 bool lt, bool lg) {
+    if (mu0.empty())
+        return std::vector<double>(x.size(), lg ? -1.0e100 : 0.0);
+    const std::size_t n = x.size();
+    const std::size_t m = mu0.size();
+    if (!lg) {
+        // R's multi-mu non-log `pnpt_` uses a NORMAL cdf with stdev = df —
+        // `pnormarray(x, mu0, n = df, lt)` (a copy-paste quirk in R's
+        // miscfuns.h, where the t cdf was intended). Replicated verbatim so
+        // the public wrapper matches R numerically; only the lg path uses the
+        // true (non-central) t cdf, exactly as R's log branch does.
+        std::vector<double> out(n, 0.0);
+        for (std::size_t i = 0; i < n; ++i) {
+            double s = 0.0;
+            for (std::size_t j = 0; j < m; ++j)
+                s += stats::pnorm(x[i], mu0[j], df, lt) * pi0[j];
+            out[i] = s;
+        }
+        return out;
+    }
+    return log_mix(kern::kmat_pnt_log(x, mu0, df, lt), pi0);
+}
+
+// `dnpdiscnorm_` (public, both lg paths).
+inline std::vector<double> dnpdiscnorm_(const std::vector<double>& x,
+                                        const std::vector<double>& mu0,
+                                        const std::vector<double>& pi0,
+                                        double b, double h, bool lg) {
+    if (mu0.empty())
+        return std::vector<double>(x.size(), lg ? -1.0e100 : 0.0);
+    if (!lg)
+        return kern::dnpdiscnorm(x, mu0, pi0, b, h);
+    return log_mix(kern::ddiscnorm_log(x, mu0, b, h), pi0);
+}
+
+// `pnpdiscnorm_` (public, both lg paths; `lt` = lower.tail).
+inline std::vector<double> pnpdiscnorm_(const std::vector<double>& x,
+                                        const std::vector<double>& mu0,
+                                        const std::vector<double>& pi0,
+                                        double b, double h, bool lt, bool lg) {
+    if (mu0.empty())
+        return std::vector<double>(x.size(), lg ? -1.0e100 : 0.0);
+    const std::size_t n = x.size();
+    const std::size_t m = mu0.size();
+    const bool shift_mu = (m == 1) || (n > m);
+    if (!lg) {
+        std::vector<double> out(n, 0.0);
+        for (std::size_t i = 0; i < n; ++i) {
+            double s = 0.0;
+            for (std::size_t j = 0; j < m; ++j) {
+                const double c = shift_mu
+                                     ? stats::pnorm(x[i], mu0[j] - h, b, lt)
+                                     : stats::pnorm(x[i] + h, mu0[j], b, lt);
+                s += c * pi0[j];
+            }
+            out[i] = s;
+        }
+        return out;
+    }
+    return log_mix(kern::pdiscnorm_log(x, mu0, b, h, lt), pi0);
+}
+
+// `dnppois_` (public, both lg paths). R's lg path for m > 1 contains a
+// copy-paste bug reproduced exactly here: the chain starts with the Poisson
+// term for support point 0, but for support points j >= 1 it adds the
+// NORMAL term `dnpnorm_(x, mu0[j], pi0[j], stdev, lg)` (a normal with mean
+// mu0[j] and the wrapper's `stdev`) instead of the Poisson term. The
+// non-log path is the true Poisson mixture (R's `dpoisarray * pi0`), so the
+// two branches are not even mathematically consistent with each other —
+// that is R, and the match-to-R requirement reproduces it.
+inline std::vector<double> dnppois_(const std::vector<double>& x,
+                                    const std::vector<double>& mu0,
+                                    const std::vector<double>& pi0,
+                                    double stdev, bool lg) {
+    if (mu0.empty())
+        return std::vector<double>(x.size(), lg ? -1.0e100 : 0.0);
+    if (!lg)
+        return kern::dnppois(x, mu0, pi0);
+    const std::size_t n = x.size();
+    const std::size_t m = mu0.size();
+    const double base = stats::LN_SQRT_2PI + std::log(stdev);
+    std::vector<double> out(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+        // Support point 0: the Poisson term (R's single-mu `dpoisarray`
+        // log path: `(x + mu > 0) ? x ln mu - mu - lgamma(x + 1) : 0`).
+        double acc = (x[i] + mu0[0] > 0.0)
+                         ? x[i] * std::log(mu0[0]) - mu0[0] -
+                               stats::gammln(x[i] + 1.0)
+                         : 0.0;
+        acc += (pi0[0] > 0.0) ? std::log(pi0[0]) : -1.0e100;
+        for (std::size_t j = 1; j < m; ++j) {
+            // R's bug: the NORMAL term `dnpnorm_(x, mu0[j], pi0[j], stdev, lg)`
+            // (log normal pdf + log pi0[j]).
+            const double d = (x[i] - mu0[j]) / stdev;
+            double t = -0.5 * d * d - base;
+            t += (pi0[j] > 0.0) ? std::log(pi0[j]) : -1.0e100;
+            acc = stats::logspaceadd(acc, t);
+        }
+        out[i] = acc;
+    }
+    return out;
+}
+
+// `pnppois_` (public, both lg paths; `lt` = lower.tail).
+inline std::vector<double> pnppois_(const std::vector<double>& x,
+                                    const std::vector<double>& mu0,
+                                    const std::vector<double>& pi0, bool lt,
+                                    bool lg) {
+    if (mu0.empty())
+        return std::vector<double>(x.size(), lg ? -1.0e100 : 0.0);
+    const std::size_t n = x.size();
+    const std::size_t m = mu0.size();
+    if (!lg) {
+        std::vector<double> out(n, 0.0);
+        for (std::size_t i = 0; i < n; ++i) {
+            double s = 0.0;
+            for (std::size_t j = 0; j < m; ++j)
+                s += stats::ppois(x[i], mu0[j], lt) * pi0[j];
+            out[i] = s;
+        }
+        return out;
+    }
+    return log_mix(kern::kmat_ppois_log(x, mu0, lt), pi0);
+}
+
+// `dnpdisct_` (public, both lg paths).
+inline std::vector<double> dnpdisct_(const std::vector<double>& x,
+                                     const std::vector<double>& mu0,
+                                     const std::vector<double>& pi0, double df,
+                                     double h, bool lg) {
+    if (mu0.empty())
+        return std::vector<double>(x.size(), lg ? -1.0e100 : 0.0);
+    if (!lg)
+        return kern::dnpdisct(x, mu0, pi0, df, h);
+    return log_mix(kern::ddisct_log(x, mu0, df, h), pi0);
+}
+
+// (n x 1) multivariate-normal mixture density `sum_j pi0[j] N(x[i]; mu0[j],
+// Sigma)`; `lg = true` returns its log (the log of the summed density).
+inline Eigen::MatrixXd dnpnormND(const Eigen::MatrixXd& x,
+                                 const Eigen::MatrixXd& mu0,
+                                 const Eigen::VectorXd& pi0,
+                                 const Eigen::MatrixXd& Sigma, bool lg) {
+    const Eigen::MatrixXd mix = dnormNDarray(x, mu0, Sigma, false) * pi0;
+    return lg ? mix.array().log() : mix;
 }
 
 }  // namespace kern

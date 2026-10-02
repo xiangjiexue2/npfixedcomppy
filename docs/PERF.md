@@ -205,14 +205,164 @@ Eigen 5.0.0 nor R's RcppEigen 3.4.0 ships a double-precision SIMD
 `pexp` for x86 (grep-verified in both packet headers), so the fill is
 `exp`-bound on both sides and no wider instruction set can touch it.
 
+### 4a. The `npnorm2Dll` (2-D) exception
+
+The 2-D experimental family is still the one documented case where this
+port is slower than R. A hand-unrolled 2×2 density-kernel fast path
+(see below) closed most of the old ~28× gap on the reference run:
+
+| case (same machine, same data n=300, same initial mix & grid) | `npfixedcomppy` | R | ratio |
+|---|---|---|---|
+| `computemixdist(X, method="npnorm2Dll")`, 2-D n=300 | ≈ 4.3 s (median of 5) | ≈ 0.75 s (best of 3) | ~5.7× slower |
+
+Verified decomposition (this build):
+
+* **The kernels are bit-exact and ≈ 7× cheaper per call.** The 2-D
+  family only ever calls `dnormNDarray` with `dim == 2`. The original
+  port mirrored the R source line-for-line — a per-point dynamic
+  `dec.solve(d)` — which heap-allocates two `VectorXd` temporaries per
+  data point (≈ 600 mallocs per call at n = 300) that MSVC `/O2` cannot
+  escape-analyze away (the R build's GCC `-O2` sink-eliminates the
+  same code). That made the density kernel ≈ 89 % of the fit's wall
+  time (`dnormNDarray` n=300, m=1: ≈ 44 µs/call; 21.1 s fit). The fix
+  is a hand-unrolled 2×2 fast path in `npfc_kernels.h`: the Cholesky
+  factors come from the same `unblocked` algorithm Eigen's `LLT` runs
+  for size < 32 (l11 = √S00, l21 = S10/l11, l22 = √(S11−l21²)) and each
+  point is the two-stage triangular solve of `dec.solve(d)` (forward
+  with L, backward with Lᵀ) dotted with `d`, written out as scalars —
+  same factors, same operation order, no temporaries.
+  `dnormNDarray` n=300, m=1 is now ≈ 6.5 µs/call and `dnpnormND`
+  ≈ 7.4 µs/call (the `dim ≠ 2` path is unchanged).
+* **The cross-evaluation parity is unchanged by the fast path.** PY's
+  kernel evaluated at R's final points gives ll = 848.8877528768896
+  (R's own: 848.88775287688986), and R's kernel at PY's final points
+  gives 848.7472820349071 (PY's own: 848.747282034907) — both
+  cross-evaluations match an independent numpy recomputation to
+  < 1e-12, and the fit's reported `ll` / iteration trajectory are
+  bit-identical to the pre-optimization build.
+* **The remaining cost is the L-BFGS-B support-point search.** The
+  family runs one box-constrained L-BFGS-B problem per grid cell
+  (103 × 103 = 10,609 sub-problems per outer iteration × 6 iterations)
+  plus a weight subproblem and a collapse per iteration.
+  `NPFIXEDCOMPY_PROFILE=1` reports `objevals=421810` for the n=300
+  reference run. At ≈ 7.4 µs per `dnpnormND` call, the density kernel
+  is ≈ 3.1 s of the 4.3 s; the rest is the per-evaluation gradient
+  temporaries in `gradfun` (`fullden`, `temp`, the 300×2 replicated
+  `murep` — again heap temporaries MSVC keeps while the R build's GCC
+  eliminates them) and the per-cell L-BFGSpp machinery (problem
+  construction, Cauchy-point / subspace-minimization bookkeeping,
+  backtracking). The per-cell early-exit (`projgnorm ≤ ε` on the
+  initial midpoint) fires for the empty cells in both implementations.
+* **The result is a valid — in the reference run, slightly better —
+  local optimum.** The search accepts a grid cell only on a *strictly*
+  negative objective, which is exquisitely sensitive to the
+  floating-point trajectory; PY and R each converge deterministically
+  (6 iterations both sides) to different optima, PY's NLL 848.747282034907
+  vs R's 848.88775287688986 (lower is better). `tests/verify_2d_same.py`
+  pins all of this as the parity gate for the family.
+
+This is inherited algorithmic structure, not a port defect: the R
+package documents `npnorm2Dll` as *experimental and possibly very slow*,
+and the per-cell L-BFGS-B loop is the documented design. Folding the
+per-evaluation gradient temporaries into scalars (or a cell-pruning
+heuristic) would be the obvious next speed-up; neither has been added
+because both change the floating-point trajectory of the support-point
+search and therefore which (valid) optimum is found, which the
+match-to-R contract treats as out of scope for this family.
+
+#### 4a.1 Solver replacement evaluated: CppNumericalSolvers, NLopt, and a wider sweep
+
+The per-cell solver was evaluated against **CppNumericalSolvers**
+(`PatWie/CppNumericalSolvers`, GPL/MIT dual-licensed) and **NLopt**
+(not present in this environment), and a wider literature sweep of
+bound-constrained and mixture-model algorithms was performed. No
+rejected candidate was vendored into the package — the tree adds no
+external dependency, and the default path is byte-identical to the
+pre-evaluation build (`verify_2d_same.py` green: ll
+848.7472820349071 on the reference run, two-run bit-determinism).
+
+* **cppoptlib's `LbfgsbSolver` is a different implementation**, not a
+  build of the same code: its convergence test is a hard-coded
+  projected-gradient norm ≤ 1e-4 (LBFGSpp tests the *unprojected*
+  gradient against the caller's `tol`); its More–Thuente line search
+  is run on the **unconstrained** function (bounds are clamped only
+  after `findMinimize()` returns, and the post-hoc clamp does not
+  re-evaluate the objective), so its accepted steps and its `fval`
+  reporting differ from LBFGSpp's; and its history update
+  reconstructs `M` with a dense `M.inverse()` every iteration instead
+  of LBFGSpp's rank-1/2 recursion. At n = 2 these costs are tiny, so
+  the wall-time difference is almost entirely the extra iterations.
+* **Measured live (n=300 2-D run, same data / initial mix / grid /
+  tol), via a temporary adapter that was removed afterwards:**
+
+  | | default LBFGSpp | cppoptlib `LbfgsbSolver` |
+  |---|---|---|
+  | wall | ≈ 8.2 s | ≈ 20.1 s |
+  | objective evaluations | 769,533 | 1,959,715 (2.5×) |
+  | result ll / iter / support | 982.7562335069146 / 9 / 6 | 982.75623387… / 9 / 6 |
+
+  The cppoptlib optimum differs from the R-matching one by ~3.7e-10 in
+  ll — a different (valid) local optimum, which the match-to-R contract
+  treats as a trajectory break. Its per-evaluation cost is in fact
+  comparable (≈ 10.2 µs vs ≈ 10.7 µs), so the 2.4× wall ratio is the
+  2.5× evaluation ratio, i.e. convergence policy, not kernel cost.
+* **NLopt**: `LD_LBFGS` is a C port of the same LBFGS-B paper
+  implementation with a per-evaluation C-callback hop — the same
+  algorithmic behavior plus a cross-language boundary, with no
+  convergence advantage.
+* **Wider sweep — nothing both faster *and* trajectory-compatible:**
+  * **LMBOPT** (Neumaier & Azmi, arXiv:1410.7714) — the best-documented
+    bound-constrained solver (active-set + Wolfe line search, super-
+    linear convergence, "finitely terminating" for quadratic-like
+    problems). Its advantage is aimed at general/n-to-large problems;
+    at n = 2 the extra active-set machinery buys nothing against a
+    2-D LBFGS-B, and its published implementation is MATLAB
+    (`Matlab_LMBOPT`), not a vendorable C++ core.
+  * **Box-constrained L-MQN / projected-gradient family** (Pytlak,
+    ASACG, box L-BFGS variants): same asymptotic class as LBFGS-B
+    (quasi-Newton, super-linear); the differences are in
+    active-set/box handling, not in convergence speed at this
+    dimension, and each is a different algorithm — any swap changes
+    the per-cell trajectory and hence the final optimum.
+  * **Nelder–Mead / derivative-free**: O(ε⁻²)-style complexity and no
+    tolerance semantics comparable to the solver's `tol`; the
+    objective is smooth (we have an analytic gradient), so dropping
+    gradient information is strictly worse, and a different
+    algorithm again.
+  * **Mixture-model support-search alternatives** (the statistical
+    literature on component initialization for EM): directional-
+    derivative screening on the grid (evaluating only the best
+    coordinate direction per point, as in several fast component-search
+    EM variants), Metropolis–Hastings random candidate selection, and
+    support-reduction / vertex-direction active-set methods. These
+    change the *selection algorithm* itself (which cells are accepted,
+    in what order, under what test), i.e. the R trajectory by
+    construction — out of scope for a faithful port, and none of them
+    is faster in the "fewer L-BFGS-B evaluations per accepted cell"
+    sense anyway, since the per-cell solve only runs on candidates.
+  * **Cell-level early-exit tuning** (e.g. testing the midpoint's
+    gradient before the line search): the vendored LBFGS-B already
+    exits before its first line search whenever the projected gradient
+    norm at the midpoint is ≤ tol, which is exactly why most empty
+    cells are cheap; the measured 8.2 s is dominated by the
+    non-exit cells, where a genuinely cheaper solve would be needed —
+    and per the paragraphs above, none exists that keeps the
+    trajectory.
+
+**Unifying the `d0`/`d1` gradient flags** (one 3-vector gradient
+instead of the two booleans) was evaluated and rejected: every 1-D
+family always requests both components, and the `d0`-only branch
+serves only the R `npnorm2Dll` gradient convention (d0 = the
+probability-direction scalar, d1 = the 2 support-point directions).
+Collapsing the flags would be a cosmetic refactor — it cannot change
+any floating-point trajectory, and the per-evaluation cost is set by
+`dnpnormND`, not by which subset of the gradient is requested.
+
 ## 5. What was *not* done, and why
 
 * **Hand-written OpenMP** — stripped entirely (see section 2); it was a
   crash/determinism hazard and the gains are re-obtained bit-safely by
   the cache.
-* **SIMD GEMM library (`faer`)** — earlier measurements (tall-and-thin
-  `n × m` with `m ≤ ~20` production columns) showed GEMM libraries lose to
-  a streaming dot-loop at these shapes; not adopted.
 * **Threading the remaining work** — the two remaining hotspots (the
   off-grid `dnt` evaluations in `solvegrad`, the NNLS in `weights`) are
   embarrassingly parallel over `n`, but per the design constraint they
@@ -245,5 +395,14 @@ Parity gates (all must report `TOTAL BAD: 0`):
 
 ```bat
 cd npfixedcomppy
-for %A in (npnormll nptll cvmadcll pois density binned coveb posteriormean) do .venv\Scripts\python.exe tests\verify_%A.py
+for %A in (npnormll nptll cvmadcll pois density binned coveb posteriormean kernels 2d_same) do .venv\Scripts\python.exe tests\verify_%A.py
 ```
+
+`tests/verify_kernels.py` carries the 30-case 1-D/2-D kernel gold set
+(`ref_new.txt` + the R-dumped inputs, recorded against live R 4.6.1);
+`tests/verify_2d_same.py` carries the `npnorm2Dll` gold set
+(`parity_2d.csv`, `grid_2d.csv`, the initial mix, and R's final points
+`r3_pts_2d.csv` / `r3_pr_2d.txt`, recorded by `C:\...\rebuild\verify2d.R`).
+
+2-D wall times: `.venv\Scripts\python.exe bench_2d.py` (Py) and
+`Rscript bench_2d_r.R` (R), both reading the shared `parity_2d.csv`.

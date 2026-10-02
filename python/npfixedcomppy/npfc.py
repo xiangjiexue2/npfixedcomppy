@@ -295,6 +295,15 @@ def computemixdist(
 
     >>> r = computemixdist(x, method="nptll", beta=5, mu0=[-0.5], pi0=[0.3])
     """
+    # The bivariate-normal family takes an (n, 2) data matrix and a 2 x 2
+    # covariance; it runs its own L-BFGS-B support-point search and does not
+    # use the one-dimensional engine's scalar `beta`, so dispatch it before the
+    # one-dimensional `FAMILIES` validation.
+    if method == "npnorm2Dll":
+        return _computemixdist_npnorm2dll(
+            v, mu0=mu0, pi0=pi0, beta=beta, mix=mix, gridpoints=gridpoints,
+            tol=tol, maxit=maxit, verbose=verbose,
+        )
     if method not in FAMILIES:
         raise ValueError(f"unknown method {method!r}; expected one of {sorted(FAMILIES)}")
     if beta is None:
@@ -328,6 +337,77 @@ def computemixdist(
             float(tol), int(maxit), int(verbose),
         )
     return _to_npmix(res)
+
+
+def _computemixdist_npnorm2dll(
+    v: Sequence[float],
+    mu0: Optional[Sequence[float]] = None,
+    pi0: Optional[Sequence[float]] = None,
+    beta: Optional[Sequence[float]] = None,
+    mix: Optional[dict] = None,
+    gridpoints: Optional[Sequence[float]] = None,
+    tol: float = 1e-6,
+    maxit: int = 100,
+    verbose: int = 0,
+) -> Npmix:
+    """R's ``computemixdist.npnorm2Dll`` front-end.
+
+    ``v`` is an ``(n, 2)`` array of bivariate observations and ``beta`` the
+    ``2 x 2`` covariance matrix (default the identity). The defaults for
+    ``mu0`` / ``pi0`` / the 2D ``gridpoints`` / the initial mixing
+    distribution are built inside the C++ entry exactly as the R wrapper does
+    (per-marginal ``initial.npnorm`` combined into a tensor product).
+    """
+    arr = np.ascontiguousarray(v, dtype=float)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 2)
+    if arr.ndim != 2 or arr.shape[1] != 2:
+        raise ValueError("npnorm2Dll expects data of shape (n, 2)")
+    # R defaults: mu0 = matrix(0, 1, 2); pi0 = 0; beta = diag(2).
+    mu0f = (
+        np.ascontiguousarray(mu0, dtype=float).ravel()
+        if mu0 is not None
+        else np.array([0.0, 0.0])
+    )
+    pi0f = _to_vec(pi0) if pi0 is not None else np.array([0.0])
+    beta_m = (
+        np.ascontiguousarray(beta, dtype=float)
+        if beta is not None
+        else np.eye(2)
+    )
+    beta_m = np.ascontiguousarray(beta_m, dtype=float).reshape(2, 2).ravel()
+    if mix is not None:
+        mp = np.ascontiguousarray(mix["pt"], dtype=float).reshape(-1, 2).ravel()
+        mpr = _to_vec(mix["pr"])
+    else:
+        mp = np.empty(0)
+        mpr = np.empty(0)
+    gp = (
+        np.ascontiguousarray(gridpoints, dtype=float).ravel()
+        if gridpoints is not None
+        else np.empty(0)
+    )
+    res = _core.npnorm2Dll(
+        arr, mu0f, pi0f, beta_m, mp, mpr, gp,
+        float(tol), int(maxit), int(verbose),
+    )
+    # The 2D family reports its covariance matrix in `beta` and its support
+    # points as (n, 2) — build the Npmix directly rather than via `_to_npmix`
+    # (which coerces `beta` to a scalar).
+    return Npmix(
+        pt=[list(row) for row in res["pt"]],
+        pr=list(res["pr"]),
+        beta=np.array(
+            [[float(res["beta"][0][0]), float(res["beta"][0][1])],
+             [float(res["beta"][1][0]), float(res["beta"][1][1])]]
+        ),
+        family=str(res["family"]),
+        min_gradient=float(res["min_gradient"]),
+        ll=float(res["ll"]),
+        flag=str(res["flag"]),
+        iter=int(res["iter"]),
+        convergence=int(res["convergence"]),
+    )
 
 
 def estpi0(
@@ -512,6 +592,257 @@ def posteriormean(
         np.ascontiguousarray(result.pr, dtype=float).ravel(),
         float(result.beta),
         fpt,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public density / cdf functions (the R ``dnp*`` / ``pnp*`` family).
+#
+# Each mirrors the R wrapper exactly, in BOTH its ``lg = False`` (linear sum
+# of the weighted per-component kernel) and ``lg = True`` (a sequential
+# ``logspaceadd`` chain of ``log K(i, j) + log pi0[j]``) code paths; the
+# per-component kernel and its log are computed in the C++ extension.
+# ---------------------------------------------------------------------------
+
+def _1d(arr: Sequence[float]) -> np.ndarray:
+    return np.ascontiguousarray(arr, dtype=float).ravel()
+
+
+def dnpnorm(
+    x: Sequence[float],
+    mu0: Sequence[float],
+    pi0: Sequence[float],
+    stdev: float = 1.0,
+    lg: bool = False,
+) -> np.ndarray:
+    """Density of the non-parametric normal mixture.
+
+    ``dnpnorm(x, mu0, pi0, stdev)`` = ``sum_j pi0[j] N(x; mu0[j], stdev)`` at
+    every observation ``x`` (the R ``dnpnorm``). With ``lg=True`` the log of
+    that mixture is returned, computed in log space (the R ``lg`` path).
+    """
+    return np.asarray(
+        _core.dnpnorm(
+            _1d(x),
+            _1d(mu0),
+            _1d(pi0),
+            float(stdev),
+            bool(lg),
+        )
+    )
+
+
+def pnpnorm(
+    x: Sequence[float],
+    mu0: Sequence[float],
+    pi0: Sequence[float],
+    stdev: float = 1.0,
+    lt: bool = True,
+    lg: bool = False,
+) -> np.ndarray:
+    """Distribution function of the non-parametric normal mixture.
+
+    ``pnpnorm(x, mu0, pi0, stdev, lt)`` = ``sum_j pi0[j] Phi(x; mu0[j],
+    stdev)`` (lower tail ``lt=True``, upper tail ``lt=False``). ``lg=True``
+    returns the log (R's ``pnpnorm``).
+    """
+    return np.asarray(
+        _core.pnpnorm(
+            _1d(x), _1d(mu0), _1d(pi0), float(stdev), bool(lt), bool(lg)
+        )
+    )
+
+
+def dnpnormc(
+    x: Sequence[float],
+    mu0: Sequence[float],
+    pi0: Sequence[float],
+    n: float,
+    lg: bool = False,
+) -> np.ndarray:
+    """Density of the non-parametric one-parameter normal mixture.
+
+    ``dnpnormc(x, mu0, pi0, n)`` = ``sum_j pi0[j] N(x; mu0[j],
+    (1 - mu0[j]^2)/sqrt(n))`` — the kernel of the ``npnormcll`` (correlation)
+    family, where ``n`` is the number of observations (R's ``dnpnormc``).
+    """
+    return np.asarray(
+        _core.dnpnormc(_1d(x), _1d(mu0), _1d(pi0), float(n), bool(lg))
+    )
+
+
+def dnpt(
+    x: Sequence[float],
+    mu0: Sequence[float],
+    pi0: Sequence[float],
+    df: float,
+    lg: bool = False,
+) -> np.ndarray:
+    """Density of the non-parametric non-central-t mixture.
+
+    ``dnpt(x, mu0, pi0, df)`` = ``sum_j pi0[j] t(x; df = df, ncp = mu0[j])``
+    — the kernel of the ``nptll`` family (``df = inf`` is the normal with
+    mean ``mu0[j]``). R's ``dnpt``.
+    """
+    return np.asarray(
+        _core.dnpt(_1d(x), _1d(mu0), _1d(pi0), float(df), bool(lg))
+    )
+
+
+def pnpt(
+    x: Sequence[float],
+    mu0: Sequence[float],
+    pi0: Sequence[float],
+    df: float,
+    lt: bool = True,
+    lg: bool = False,
+) -> np.ndarray:
+    """Distribution function of the non-parametric non-central-t mixture.
+
+    ``pnpt(x, mu0, pi0, df, lt)`` = ``sum_j pi0[j] T(x; df = df, ncp =
+    mu0[j], lower.tail = lt)`` (R's ``pnpt``).
+    """
+    return np.asarray(
+        _core.pnpt(_1d(x), _1d(mu0), _1d(pi0), float(df), bool(lt), bool(lg))
+    )
+
+
+def dnpdiscnorm(
+    x: Sequence[float],
+    mu0: Sequence[float],
+    pi0: Sequence[float],
+    stdev: float,
+    h: float,
+    lg: bool = False,
+) -> np.ndarray:
+    """Density of the non-parametric (binned) discrete-normal mixture.
+
+    ``dnpdiscnorm(x, mu0, pi0, stdev, h)`` = ``sum_j pi0[j]`` of the
+    trapezoid-binned normal density over the grid step ``h`` — the kernel of
+    the binned (``...w``) normal families (R's ``dnpdiscnorm``).
+    """
+    return np.asarray(
+        _core.dnpdiscnorm(_1d(x), _1d(mu0), _1d(pi0), float(stdev), float(h), bool(lg))
+    )
+
+
+def pnpdiscnorm(
+    x: Sequence[float],
+    mu0: Sequence[float],
+    pi0: Sequence[float],
+    stdev: float,
+    h: float,
+    lt: bool = True,
+    lg: bool = False,
+) -> np.ndarray:
+    """Distribution function of the non-parametric (binned) discrete-normal
+    mixture: ``sum_j pi0[j]`` of ``Phi(x; mu0[j] - h, stdev)`` (R's
+    ``pnpdiscnorm``).
+    """
+    return np.asarray(
+        _core.pnpdiscnorm(
+            _1d(x), _1d(mu0), _1d(pi0), float(stdev), float(h), bool(lt), bool(lg)
+        )
+    )
+
+
+def dnppois(
+    x: Sequence[float],
+    mu0: Sequence[float],
+    pi0: Sequence[float],
+    stdev: float = 1.0,
+    lg: bool = False,
+) -> np.ndarray:
+    """Density of the non-parametric Poisson mixture.
+
+    ``dnppois(x, mu0, pi0)`` = ``sum_j pi0[j] Pois(x; mu0[j])`` at each count
+    ``x`` — the kernel of the ``nppoisll`` family (R's ``dnppois``).
+
+    ``stdev`` is the R wrapper's fourth argument: unused by the non-log path
+    and only relevant to the (quirky) log path when ``len(mu0) > 1``, where R
+    adds normal terms ``N(x; mu0[j], stdev)`` for ``j >= 1`` (a copy-paste
+    bug in the R package, faithfully reproduced). Default ``1.0`` matches the
+    R exported function's default.
+    """
+    return np.asarray(
+        _core.dnppois(_1d(x), _1d(mu0), _1d(pi0), float(stdev), bool(lg))
+    )
+
+
+def pnppois(
+    x: Sequence[float],
+    mu0: Sequence[float],
+    pi0: Sequence[float],
+    lt: bool = True,
+    lg: bool = False,
+) -> np.ndarray:
+    """Distribution function of the non-parametric Poisson mixture:
+    ``sum_j pi0[j] PoisCdf(x; mu0[j], lower.tail = lt)`` (R's ``pnppois``).
+    """
+    return np.asarray(
+        _core.pnppois(_1d(x), _1d(mu0), _1d(pi0), bool(lt), bool(lg))
+    )
+
+
+def dnpdisct(
+    x: Sequence[float],
+    mu0: Sequence[float],
+    pi0: Sequence[float],
+    df: float,
+    h: float,
+    lg: bool = False,
+) -> np.ndarray:
+    """Density of the non-parametric (binned) non-central-t mixture:
+    ``sum_j pi0[j]`` of the grid-binned non-central-t density (step ``h``,
+    df ``df``) — the kernel of the ``nptllw`` family (R's ``dnpdisct``).
+    """
+    return np.asarray(
+        _core.dnpdisct(_1d(x), _1d(mu0), _1d(pi0), float(df), float(h), bool(lg))
+    )
+
+
+def dnpnormND(
+    x: np.ndarray,
+    mu0: np.ndarray,
+    pi0: Sequence[float],
+    sigma: np.ndarray,
+    lg: bool = False,
+) -> np.ndarray:
+    """Density of the non-parametric N-dimensional normal mixture.
+
+    ``x`` is an ``(n, dim)`` array of points, ``mu0`` a ``(k, dim)`` array of
+    support points, ``pi0`` the ``k`` weights and ``sigma`` the ``dim x dim``
+    covariance: ``dnpnormND`` = ``sum_j pi0[j] N(x; mu0[j], sigma)`` (R's
+    ``dnpnormND``). ``lg=True`` returns the log.
+    """
+    return np.asarray(
+        _core.dnpnormND(
+            np.ascontiguousarray(x, dtype=float),
+            np.ascontiguousarray(mu0, dtype=float),
+            _1d(pi0),
+            np.ascontiguousarray(sigma, dtype=float),
+            bool(lg),
+        )
+    )
+
+
+def dnormNDarray(
+    x: np.ndarray,
+    mu0: np.ndarray,
+    sigma: np.ndarray,
+    lg: bool = False,
+) -> np.ndarray:
+    """The ``(n, k)`` multivariate-normal pdf kernel: entry ``(i, j)`` is
+    ``N(x[i]; mu0[j], sigma)`` (R's ``dnormNDarray_``). ``lg=True`` returns
+    the log-kernel. Useful for building custom weighted mixes.
+    """
+    return np.asarray(
+        _core.dnormNDarray(
+            np.ascontiguousarray(x, dtype=float),
+            np.ascontiguousarray(mu0, dtype=float),
+            np.ascontiguousarray(sigma, dtype=float),
+            bool(lg),
+        )
     )
 
 

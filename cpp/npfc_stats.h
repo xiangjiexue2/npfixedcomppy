@@ -50,8 +50,13 @@ inline double gammln(double z) {
         771.32342877765313,  -176.61502916214059, 12.507343278686905,
         -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7};
     if (z < 0.5) {
-        // Reflection: Gamma(z) Gamma(1-z) = pi / sin(pi z).
-        return std::log(PI_C / std::sin(PI_C * z)) - gammln(1.0 - z);
+        // R's `lgamma` is log|Gamma|: it is +Inf at the non-positive integer
+        // poles, and the reflection formula uses |sin(pi z)| (the sign of
+        // sin(pi z) is the sign of Gamma, not of its log).
+        if (z <= 0.0 && std::floor(z) == z)
+            return std::numeric_limits<double>::infinity();
+        return std::log(PI_C) - std::log(std::abs(std::sin(PI_C * z))) -
+               gammln(1.0 - z);
     }
     const double zz = z - 1.0;
     double x = COEF[0];
@@ -255,6 +260,22 @@ inline double pgamma(double x, double a, bool lower_tail) {
     double p, q;
     pgamma_both(a, x, p, q);
     return lower_tail ? p : q;
+}
+
+// Log-space regularized incomplete gamma (R's `pgamma(log.p = TRUE)`).
+// R's own log branch (src/nmath/pgamma.c) computes the REGULARIZED gamma
+// value `ans` on its normal branch (linear series for x < a+1, linear Lentz
+// CF for x >= a+1) and then applies `log(ans)` — there is NO log-space CF
+// product. We mirror that structure exactly: shared `pgamma_both` for `ans`,
+// and `log(ans)` for the lower-tail log branch (R's `Rf_logspace_sub` is
+// only reachable from the upper-tail complement, which `pgamma`'s log path
+// never takes — `Rf_ppois(log=TRUE)` uses `lower.tail = FALSE`, i.e. the
+// `ans` branch directly).
+inline double pgamma_log(double x, double a, bool lower_tail) {
+    double p, q;
+    pgamma_both(a, x, p, q);
+    const double v = lower_tail ? p : q;
+    return std::log(v);
 }
 
 // ---------------------------------------------------------------------------
@@ -540,16 +561,47 @@ inline double dpois(double x, double lambda) {
     return std::exp(x * std::log(lambda) - lambda - gammln(x + 1.0));
 }
 
-// Poisson cdf (R's `ppois(x, lambda, lower.tail)`), via
-// `P(X <= x) = Q(x + 1, lambda) = pgamma(lambda, shape = x + 1,
-// lower.tail = FALSE)`.
+// Poisson cdf (R's `ppois(x, lambda, lower.tail)`) — a faithful port of
+// R's `Rf_ppois` (src/nmath/ppois.c): NaN propagation, `x < 0 -> 0`,
+// `lambda == 0` degenerates to a point mass at 0, `floor(x + 1e-7)` for the
+// non-integer rounding, then `pgamma(lambda, shape = lambda, rate = x + 1,
+// lower.tail = !lower.tail)`. (The shape/rate pairing is easy to flip: R's
+// signature is `pgamma(q, shape, rate, lower.tail, ...)`.)
 inline double ppois(double x, double lambda, bool lower_tail) {
-    if (lambda <= 0.0) {
-        // degenerate point mass at 0
-        const double p0 = (x >= 0.0) ? 1.0 : 0.0;
-        return lower_tail ? p0 : 1.0 - p0;
-    }
-    return pgamma(lambda, x + 1.0, !lower_tail);
+    if (std::isnan(x) || std::isnan(lambda))
+        return nanv();
+    if (lambda < 0.0)
+        return nanv();
+    if (x < 0.0)
+        return lower_tail ? 0.0 : 1.0;  // R: R_DT_0 / R_DT_1
+    if (lambda == 0.0)
+        return lower_tail ? 1.0 : 0.0;
+    // R's `Rf_ppois`: only finite x is floored (`floor(x + 1e-7)`); +Inf and
+    // -Inf pass through unchanged, so the gamma shape (x + 1) is ±Inf and
+    // `pgamma(lambda, ±Inf, !lower.tail)` yields the tails (probe12:
+    // ppois(±Inf, 1.5, lt) == lt, ppois(-Inf, 1.5, lt, lg) == lt ? 0 : -Inf).
+    const double xf = std::isfinite(x) ? std::floor(x + 1e-7) : x;
+    return pgamma(lambda, xf + 1.0, !lower_tail);
+}
+
+// Log-scale Poisson cdf (R's `Rf_ppois(log.p = TRUE)`), mirroring the non-log
+// `ppois` above: `x < 0 -> log 0 = -Inf` (lower.tail) / `log 1 = 0`
+// (upper.tail), `lambda == 0 -> 0` (lower) / `-Inf` (upper), otherwise
+// `pgamma_log(shape = lambda, rate = floor(x + 1e-7) + 1, lower.tail =
+// !lower.tail)`.
+inline double ppois_log(double x, double lambda, bool lower_tail) {
+    if (std::isnan(x) || std::isnan(lambda))
+        return nanv();
+    if (lambda < 0.0)
+        return nanv();
+    if (x < 0.0)
+        return lower_tail ? -std::numeric_limits<double>::infinity() : 0.0;
+    if (lambda == 0.0)
+        return lower_tail ? 0.0 : -std::numeric_limits<double>::infinity();
+    // R's `Rf_ppois(log.p = TRUE)`: same ±Inf-passthrough x rule as the
+    // non-log branch (probe12: ppois(±Inf, 1.5, lt, lg) == lt ? 0.0 : -Inf).
+    const double xf = std::isfinite(x) ? std::floor(x + 1e-7) : x;
+    return pgamma_log(lambda, xf + 1.0, !lower_tail);
 }
 
 // ---------------------------------------------------------------------------
@@ -570,16 +622,20 @@ inline double logspaceadd(double lx, double ly) {
     return a + ln_1p_exp(b - a);
 }
 
-// R's `logspacesub`: `log(exp(lx) - exp(ly))`, requiring `lx >= ly`;
-// returns NaN otherwise (as in R for the extreme case the package hits).
+// R's `Rf_logspace_sub` (src/nmath/pgamma.c): `log(exp(lx) - exp(ly)) =
+// lx + R_Log1_Exp(ly - lx)`. `R_Log1_Exp` is the 2-branch `log(1 - exp(x))`:
+//   x <= -M_LN2 : log1p(-exp(x))   (== log(-expm1(x)) to double precision)
+//   x >  -M_LN2 : log(-expm1(x))   (accurate down to x -> 0; log1p(-exp(x))
+//                                   would round to -Inf)
+// Empirically verified against R 4.6.1 bit-for-bit (probe10): R returns the
+// accurate `log(-expm1)` value for every probed `t = ly - lx`, including
+// `t ~ -1e-21` where `log1p(-exp(t))` is `-Inf`. `M_LN2` here is R's value
+// 0.693147180559945.
 inline double logspacesub(double lx, double ly) {
-    if (lx < ly)
-        return nanv();
-    const double t = ly - lx; // <= 0
-    // log(1 - exp(t)), stable for t near 0 via log1p.
-    const double l = (t < -LN2_C) ? std::log(1.0 - std::exp(t))
-                                  : std::log1p(-std::exp(t));
-    return lx + l;
+    const double t = ly - lx;
+    if (t <= -LN2_C)
+        return lx + std::log1p(-std::exp(t));
+    return lx + std::log(-std::expm1(t));
 }
 
 } // namespace stats

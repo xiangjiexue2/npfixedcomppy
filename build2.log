@@ -1,0 +1,432 @@
+npfixedcomppy: OpenMP not detected, building serial Eigen (no OpenMP flags)
+running build_ext
+building 'npfixedcomppy._core' extension
+"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\HostX86\x64\cl.exe" /c /nologo /O2 /W3 /GL /DNDEBUG /MD -IC:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp -IC:\Users\xxjie\Documents\rebuild\npfixedcomppy\eigen -IC:\Users\xxjie\Documents\rebuild\npfixedcomppy\.venv\Lib\site-packages\pybind11\include -IC:\Users\xxjie\Documents\rebuild\npfixedcomppy\.venv\include -IC:\Users\xxjie\AppData\Local\Programs\Python\Python311\include -IC:\Users\xxjie\AppData\Local\Programs\Python\Python311\Include "-IC:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include" "-IC:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\VS\include" "-IC:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\winrt" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\cppwinrt" /EHsc /Tpcpp/npfc_nnls.cpp /Fobuild\temp.win-amd64-cpython-311\Release\cpp\npfc_nnls.obj /std:c++17 /O2 /MD /J /EHsc /utf-8 /arch:AVX2
+npfc_nnls.cpp
+"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\HostX86\x64\cl.exe" /c /nologo /O2 /W3 /GL /DNDEBUG /MD -IC:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp -IC:\Users\xxjie\Documents\rebuild\npfixedcomppy\eigen -IC:\Users\xxjie\Documents\rebuild\npfixedcomppy\.venv\Lib\site-packages\pybind11\include -IC:\Users\xxjie\Documents\rebuild\npfixedcomppy\.venv\include -IC:\Users\xxjie\AppData\Local\Programs\Python\Python311\include -IC:\Users\xxjie\AppData\Local\Programs\Python\Python311\Include "-IC:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include" "-IC:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\VS\include" "-IC:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\winrt" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\cppwinrt" /EHsc /Tpcpp/npfc_py.cpp /Fobuild\temp.win-amd64-cpython-311\Release\cpp\npfc_py.obj /std:c++17 /O2 /MD /J /EHsc /utf-8 /arch:AVX2
+npfc_py.cpp
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(121): warning C4244: 'initializing': conversion from 'Eigen::EigenBase<Derived>::Index' to 'int', possible loss of data
+        with
+        [
+            Derived=Eigen::Matrix<double,-1,1,0,-1,1>
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(121): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see reference to function template instantiation 'int LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize<const npfc::fam::NpNorm2D>(Foo &,Eigen::Matrix<double,-1,1,0,-1,1> &,Scalar &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &)' being compiled
+        with
+        [
+            Foo=const npfc::fam::NpNorm2D,
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(121): warning C4244: 'initializing': conversion from 'Eigen::EigenBase<Derived>::Index' to 'const int', possible loss of data
+        with
+        [
+            Derived=Eigen::Matrix<double,-1,1,0,-1,1>
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(135): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(135): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see reference to function template instantiation 'int LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize<const npfc::fam::NpNorm2D>(Foo &,Eigen::Matrix<double,-1,1,0,-1,1> &,Scalar &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &)' being compiled
+        with
+        [
+            Foo=const npfc::fam::NpNorm2D,
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(227): note: see reference to class template instantiation 'LBFGSpp::SubspaceMin<Scalar>' being compiled
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(124): note: while compiling class template member function 'void LBFGSpp::SubspaceMin<Scalar>::subspace_minimize(const LBFGSpp::BFGSMat<Scalar,true> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const LBFGSpp::SubspaceMin<Scalar>::IndexSet &,const LBFGSpp::SubspaceMin<Scalar>::IndexSet &,int,Eigen::Matrix<double,-1,1,0,-1,1> &)'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(227): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(135): warning C4267: 'initializing': conversion from 'size_t' to 'const int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(225): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(225): warning C4267: 'initializing': conversion from 'size_t' to 'const int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(244): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(244): warning C4267: 'initializing': conversion from 'size_t' to 'const int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(245): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(245): warning C4267: 'initializing': conversion from 'size_t' to 'const int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/Cauchy.h(96): warning C4244: 'initializing': conversion from 'Eigen::EigenBase<Derived>::Index' to 'int', possible loss of data
+        with
+        [
+            Derived=Eigen::Matrix<double,-1,1,0,-1,1>
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/Cauchy.h(96): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(153): note: see reference to class template instantiation 'LBFGSpp::Cauchy<Scalar>' being compiled
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/Cauchy.h(88): note: while compiling class template member function 'void LBFGSpp::Cauchy<Scalar>::get_cauchy_point(const LBFGSpp::BFGSMat<Scalar,true> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,Eigen::Matrix<double,-1,1,0,-1,1> &,Eigen::Matrix<double,-1,1,0,-1,1> &,LBFGSpp::Cauchy<Scalar>::IndexSet &,LBFGSpp::Cauchy<Scalar>::IndexSet &)'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(153): note: see the first reference to 'LBFGSpp::Cauchy<Scalar>::get_cauchy_point' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/Cauchy.h(96): warning C4244: 'initializing': conversion from 'Eigen::EigenBase<Derived>::Index' to 'const int', possible loss of data
+        with
+        [
+            Derived=Eigen::Matrix<double,-1,1,0,-1,1>
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/Cauchy.h(141): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/Cauchy.h(141): warning C4267: 'initializing': conversion from 'size_t' to 'const int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/Cauchy.h(142): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/Cauchy.h(142): warning C4267: 'initializing': conversion from 'size_t' to 'const int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(71): warning C4244: 'initializing': conversion from 'Eigen::EigenBase<Derived>::Index' to 'int', possible loss of data
+        with
+        [
+            Derived=Eigen::Matrix<double,-1,1,0,-1,1>
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(71): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(284): note: see reference to class template instantiation 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>' being compiled
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(69): note: while compiling class template member function 'Scalar LBFGSpp::LBFGSBSolver<Scalar,LBFGSpp::LineSearchMoreThuente>::max_step_size(const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &)'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(177): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::max_step_size' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(71): warning C4244: 'initializing': conversion from 'Eigen::EigenBase<Derived>::Index' to 'const int', possible loss of data
+        with
+        [
+            Derived=Eigen::Matrix<double,-1,1,0,-1,1>
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(102): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(102): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(100): note: while compiling class template member function 'bool LBFGSpp::SubspaceMin<Scalar>::U_converged(const LBFGSpp::SubspaceMin<Scalar>::IndexSet &,const Eigen::Matrix<double,-1,1,0,-1,1> &)'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(267): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::U_converged' in 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(227): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(102): warning C4267: 'initializing': conversion from 'size_t' to 'const int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(89): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(89): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(87): note: while compiling class template member function 'bool LBFGSpp::SubspaceMin<Scalar>::L_converged(const LBFGSpp::SubspaceMin<Scalar>::IndexSet &,const Eigen::Matrix<double,-1,1,0,-1,1> &)'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(267): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::L_converged' in 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(227): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(89): warning C4267: 'initializing': conversion from 'size_t' to 'const int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(76): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(76): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(74): note: while compiling class template member function 'bool LBFGSpp::SubspaceMin<Scalar>::P_converged(const LBFGSpp::SubspaceMin<Scalar>::IndexSet &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &)'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(267): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::P_converged' in 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(227): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(76): warning C4267: 'initializing': conversion from 'size_t' to 'const int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(64): warning C4244: 'initializing': conversion from 'Eigen::EigenBase<Derived>::Index' to 'int', possible loss of data
+        with
+        [
+            Derived=Eigen::Matrix<double,-1,1,0,-1,1>
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(64): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(62): note: while compiling class template member function 'bool LBFGSpp::SubspaceMin<Scalar>::in_bounds(const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &)'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(165): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::in_bounds' in 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(227): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(64): warning C4244: 'initializing': conversion from 'Eigen::EigenBase<Derived>::Index' to 'const int', possible loss of data
+        with
+        [
+            Derived=Eigen::Matrix<double,-1,1,0,-1,1>
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(56): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(56): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(54): note: while compiling class template member function 'void LBFGSpp::SubspaceMin<Scalar>::subvec_assign(Eigen::Matrix<double,-1,1,0,-1,1> &,const LBFGSpp::SubspaceMin<Scalar>::IndexSet &,const Eigen::Matrix<double,-1,1,0,-1,1> &)'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(167): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::subvec_assign' in 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(227): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(56): warning C4267: 'initializing': conversion from 'size_t' to 'const int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(46): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(46): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(44): note: while compiling class template member function 'Eigen::Matrix<double,-1,1,0,-1,1> LBFGSpp::SubspaceMin<Scalar>::subvec(const Eigen::Matrix<double,-1,1,0,-1,1> &,const LBFGSpp::SubspaceMin<Scalar>::IndexSet &)'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(228): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::subvec' in 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(227): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(46): warning C4267: 'initializing': conversion from 'size_t' to 'const int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/Cauchy.h(67): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/Cauchy.h(67): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/Cauchy.h(65): note: while compiling class template member function 'int LBFGSpp::Cauchy<Scalar>::search_greater(const Eigen::Matrix<double,-1,1,0,-1,1> &,const LBFGSpp::Cauchy<Scalar>::IndexSet &,const Scalar &,int)'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/Cauchy.h(197): note: see the first reference to 'LBFGSpp::Cauchy<Scalar>::search_greater' in 'LBFGSpp::Cauchy<Scalar>::get_cauchy_point'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(153): note: see the first reference to 'LBFGSpp::Cauchy<Scalar>::get_cauchy_point' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/Cauchy.h(67): warning C4267: 'initializing': conversion from 'size_t' to 'const int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(447): warning C4244: 'initializing': conversion from 'Eigen::EigenBase<Derived>::Index' to 'int', possible loss of data
+        with
+        [
+            Derived=Eigen::Matrix<double,-1,-1,0,-1,-1>
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(447): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(34): note: see reference to class template instantiation 'LBFGSpp::BFGSMat<Scalar,true>' being compiled
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(445): note: while compiling class template member function 'bool LBFGSpp::BFGSMat<Scalar,true>::apply_PtBQv(const Eigen::Matrix<double,-1,-1,0,-1,-1> &,const LBFGSpp::BFGSMat<Scalar,true>::IndexSet &,const Eigen::Matrix<double,-1,1,0,-1,1> &,Eigen::Matrix<double,-1,1,0,-1,1> &,bool) const'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(232): note: see the first reference to 'LBFGSpp::BFGSMat<Scalar,true>::apply_PtBQv' in 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(227): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(447): warning C4244: 'initializing': conversion from 'Eigen::EigenBase<Derived>::Index' to 'const int', possible loss of data
+        with
+        [
+            Derived=Eigen::Matrix<double,-1,-1,0,-1,-1>
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(448): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(448): warning C4267: 'initializing': conversion from 'size_t' to 'const int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(406): warning C4244: 'initializing': conversion from 'Eigen::EigenBase<Derived>::Index' to 'int', possible loss of data
+        with
+        [
+            Derived=Eigen::Matrix<double,-1,-1,0,-1,-1>
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(406): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(404): note: while compiling class template member function 'void LBFGSpp::BFGSMat<Scalar,true>::solve_PtBP(const Eigen::Matrix<double,-1,-1,0,-1,-1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,Eigen::Matrix<double,-1,1,0,-1,1> &) const'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(162): note: see the first reference to 'LBFGSpp::BFGSMat<Scalar,true>::solve_PtBP' in 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(227): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(406): warning C4244: 'initializing': conversion from 'Eigen::EigenBase<Derived>::Index' to 'const int', possible loss of data
+        with
+        [
+            Derived=Eigen::Matrix<double,-1,-1,0,-1,-1>
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(367): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(367): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(362): note: while compiling class template member function 'void LBFGSpp::BFGSMat<Scalar,true>::compute_FtBAb(const Eigen::Matrix<double,-1,-1,0,-1,-1> &,const LBFGSpp::BFGSMat<Scalar,true>::IndexSet &,const LBFGSpp::BFGSMat<Scalar,true>::IndexSet &,const Eigen::Matrix<double,-1,1,0,-1,1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,Eigen::Matrix<double,-1,1,0,-1,1> &) const'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(150): note: see the first reference to 'LBFGSpp::BFGSMat<Scalar,true>::compute_FtBAb' in 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(227): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(367): warning C4267: 'initializing': conversion from 'size_t' to 'const int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(368): warning C4244: 'initializing': conversion from 'Eigen::EigenBase<Derived>::Index' to 'int', possible loss of data
+        with
+        [
+            Derived=Eigen::Matrix<double,-1,-1,0,-1,-1>
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(368): warning C4244: 'initializing': conversion from 'Eigen::EigenBase<Derived>::Index' to 'const int', possible loss of data
+        with
+        [
+            Derived=Eigen::Matrix<double,-1,-1,0,-1,-1>
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(313): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(313): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(311): note: while compiling class template member function 'bool LBFGSpp::BFGSMat<Scalar,true>::apply_PtWMv(const LBFGSpp::BFGSMat<Scalar,true>::IndexSet &,const Eigen::Matrix<double,-1,1,0,-1,1> &,Eigen::Matrix<double,-1,1,0,-1,1> &,const Scalar &) const'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(252): note: see the first reference to 'LBFGSpp::BFGSMat<Scalar,true>::apply_PtWMv' in 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(227): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(313): warning C4267: 'initializing': conversion from 'size_t' to 'const int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(262): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(262): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(258): note: while compiling class template member function 'bool LBFGSpp::BFGSMat<Scalar,true>::apply_WtPv(const LBFGSpp::BFGSMat<Scalar,true>::IndexSet &,const Eigen::Matrix<double,-1,1,0,-1,1> &,Eigen::Matrix<double,-1,1,0,-1,1> &,bool) const'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(248): note: see the first reference to 'LBFGSpp::BFGSMat<Scalar,true>::apply_WtPv' in 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(227): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(280): warning C4267: '=': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(216): warning C4267: 'initializing': conversion from 'size_t' to 'int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(216): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(214): note: while compiling class template member function 'Eigen::Matrix<double,-1,-1,0,-1,-1> LBFGSpp::BFGSMat<Scalar,true>::Wb(const LBFGSpp::BFGSMat<Scalar,true>::IndexSet &) const'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(147): note: see the first reference to 'LBFGSpp::BFGSMat<Scalar,true>::Wb' in 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(227): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(216): warning C4267: 'initializing': conversion from 'size_t' to 'const int', possible loss of data
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(340): warning C4244: 'initializing': conversion from 'Eigen::EigenBase<Derived>::Index' to 'int', possible loss of data
+        with
+        [
+            Derived=Eigen::Matrix<double,-1,-1,0,-1,-1>
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(340): note: the template instantiation context (the oldest one first) is
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(338): note: while compiling class template member function 'bool LBFGSpp::BFGSMat<Scalar,true>::apply_PtWMv(const Eigen::Matrix<double,-1,-1,0,-1,-1> &,const Eigen::Matrix<double,-1,1,0,-1,1> &,Eigen::Matrix<double,-1,1,0,-1,1> &,const Scalar &) const'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(396): note: see the first reference to 'LBFGSpp::BFGSMat<Scalar,true>::apply_PtWMv' in 'LBFGSpp::BFGSMat<Scalar,true>::compute_FtBAb'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/SubspaceMin.h(150): note: see the first reference to 'LBFGSpp::BFGSMat<Scalar,true>::compute_FtBAb' in 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\LBFGSB.h(227): note: see the first reference to 'LBFGSpp::SubspaceMin<Scalar>::subspace_minimize' in 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize'
+        with
+        [
+            Scalar=double
+        ]
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\npfc_fam2d.h(294): note: see the first reference to 'LBFGSpp::LBFGSBSolver<double,LBFGSpp::LineSearchMoreThuente>::minimize' in 'npfc::fam::NpNorm2D::solvegrad'
+C:\Users\xxjie\Documents\rebuild\npfixedcomppy\cpp\./LBFGSpp/BFGSMat.h(340): warning C4244: 'initializing': conversion from 'Eigen::EigenBase<Derived>::Index' to 'const int', possible loss of data
+        with
+        [
+            Derived=Eigen::Matrix<double,-1,-1,0,-1,-1>
+        ]
+"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\HostX86\x64\link.exe" /nologo /INCREMENTAL:NO /LTCG /DLL /MANIFEST:EMBED,ID=2 /MANIFESTUAC:NO /LIBPATH:C:\Users\xxjie\Documents\rebuild\npfixedcomppy\.venv\libs /LIBPATH:C:\Users\xxjie\AppData\Local\Programs\Python\Python311\libs /LIBPATH:C:\Users\xxjie\AppData\Local\Programs\Python\Python311 /LIBPATH:C:\Users\xxjie\Documents\rebuild\npfixedcomppy\.venv\PCbuild\amd64 "/LIBPATH:C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\lib\x64" "/LIBPATH:C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\ucrt\x64" "/LIBPATH:C:\Program Files (x86)\Windows Kits\10\\lib\10.0.26100.0\\um\x64" /EXPORT:PyInit__core build\temp.win-amd64-cpython-311\Release\cpp\npfc_nnls.obj build\temp.win-amd64-cpython-311\Release\cpp\npfc_py.obj /OUT:build\lib.win-amd64-cpython-311\npfixedcomppy\_core.cp311-win_amd64.pyd /IMPLIB:build\temp.win-amd64-cpython-311\Release\cpp\_core.cp311-win_amd64.lib
+   Creating library build\temp.win-amd64-cpython-311\Release\cpp\_core.cp311-win_amd64.lib and object build\temp.win-amd64-cpython-311\Release\cpp\_core.cp311-win_amd64.exp
+Generating code
+Finished generating code
+build_exit=0

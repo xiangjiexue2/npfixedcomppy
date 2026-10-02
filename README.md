@@ -30,11 +30,25 @@ Supported families (`method` argument):
 | `npnormcvmw` | normal (binned)  | Cramér–von Mises distance  | scale (default `1`)                    |
 | `npnormadw`  | normal (binned)  | Anderson–Darling distance  | scale (default `1`)                    |
 | `nptllw`     | t (binned)       | maximum likelihood         | degrees of freedom (default `inf`)     |
+| `npnorm2Dll` | bivariate normal | maximum likelihood (experimental) | covariance matrix (default `I₂`) |
 
 The binned ("`...w`") variants pre-bin the observations onto the grid
 `h = 10^order` (default `order = -3`, i.e. `h = 10^-3`; round-down, as in
 R's `bin`) and fit the binned kernel; they are intended for large samples
 and take `order` as an extra argument (ignored by the un-binned families).
+
+`npnorm2Dll` takes an `(n, 2)` data matrix and fits a bivariate normal
+mixture (the structural parameter `beta` is the `2 x 2` covariance matrix,
+default the identity). It runs its own L-BFGS-B support-point search (the
+L-BFGS-B of yixuan/LBFGSpp, as in the R package) instead of the 1-D
+engine; the R package documents it as *experimental and possibly very
+slow*. On this build it is still the slowest family relative to R
+(n=300: ≈ 4.3 s vs ≈ 0.8 s, same data — the residual gap is the per-cell
+L-BFGS-B search machinery, after a hand-unrolled 2×2 density-kernel fast
+path cut the old ~28× gap to ~5.7×) — see
+[`docs/PERF.md`](docs/PERF.md); its kernels are bit-exact with R, and the
+resulting fit is a valid (in the reference run, actually slightly better)
+local optimum.
 
 **Compute architecture:** `Python → C++/Eigen` — a single pybind11
 extension, `npfixedcomppy._core`. The whole compute stack (engine,
@@ -80,10 +94,21 @@ enforce this. Details and measured evidence:
 | `npnormcvmw` | 正态（分箱）   | Cramér–von Mises 距离        | 尺度（默认 `1`）               |
 | `npnormadw`  | 正态（分箱）   | Anderson–Darling 距离        | 尺度（默认 `1`）               |
 | `nptllw`     | t（分箱）      | 极大似然                     | 自由度（默认 `inf`）           |
+| `npnorm2Dll` | 双变量正态     | 极大似然（实验性）           | 协方差矩阵（默认 `I₂`）        |
 
 分箱（``"...w"``）变体先将观测值合并到网格 `h = 10^order`（默认
 `order = -3`，即 `h = 10^-3`；向下取整，与 R 的 `bin` 一致），再拟合分
 箱核；面向大样本场景，`order` 为额外参数（非分箱族忽略）。
+
+`npnorm2Dll` 接收 `(n, 2)` 数据矩阵，拟合双变量正态混合分布（结构参数
+`beta` 为 `2 x 2` 协方差矩阵，默认单位阵）。它走自带的 L-BFGS-B 支撑点
+搜索（与 R 包相同，即 yixuan/LBFGSpp 的 L-BFGS-B），不复用一维引擎；
+R 包将其标注为*实验性、可能很慢*。本构建下它仍是相对 R 最慢的族
+（n=300：≈ 4.3 s vs ≈ 0.8 s，同一数据——在引入手写展开的 2×2 密度内核
+快路径后，旧 ~28× 差距已收窄到 ~5.7×，残余差距在逐格 L-BFGS-B 求解器
+机制），见
+[`docs/PERF.md`](docs/PERF.md)；其内核与 R 逐位一致，且参考运行下所得
+拟合是有效（甚至略优的）局部最优。
 
 **计算架构：** `Python → C++/Eigen`——单一 pybind11 扩展
 `npfixedcomppy._core`。整个计算栈（引擎、支撑点求解、约束非负最小二乘、
@@ -97,7 +122,154 @@ GEMM/GEMV（不支持则为串行 Eigen）；对固定构建与线程数，相�
 精度一致（ll 相对误差 ~1e-9、支撑点 ~1e-6），由 §5 的 parity 门保证。
 细节与实测证据见 [`docs/PERF.md`](docs/PERF.md)。
 
-## 2. What's new in 0.2.0 (vs 0.1.0)
+## 2. What's new in 0.2.1 (vs 0.2.0)
+
+**New: the 2-D family `npnorm2Dll`** — bivariate normal mixture via
+`computemixdist(v, method="npnorm2Dll", beta=...)`, porting R's
+`computemixdist.npnorm2Dll` (including its experimental L-BFGS-B
+support-point search, the `(n, 2)` data convention, the covariance-matrix
+`beta`, and the fixed-component arguments `mu0`/`pi0`):
+
+* `v` is an `(n, 2)` array (a flat length-`2n` vector is reshaped);
+* `beta` is the `2 x 2` covariance matrix (default the identity);
+* `mix` / `gridpoints` accept the 2-D forms `{"pt": (k, 2), "pr": (k,)}`;
+  when omitted, the defaults are built exactly as R's wrapper builds them
+  (per-marginal `initial.npnorm` / `gridpoints.npnorm`, tensor-product
+  combination);
+* the result is an `Npmix` whose `pt` is a list of `(x, y)` pairs and whose
+  `beta` holds the covariance matrix.
+
+**New: the 1-D mixture density/cdf kernels (R's `dnp*` / `pnp*` layer)** —
+exported at the top level, all backed by the C++/Eigen core:
+
+* `dnpnorm`, `pnpnorm`, `dnpnormc`, `dnpt`, `pnpt`, `dnpdiscnorm`,
+  `pnpdiscnorm`, `dnppois`, `pnppois`, `dnpdisct` (1-D families, both
+  `lg` log-space forms);
+* `dnpnormND` (2-D mixture density) and `dnormNDarray` (the `(n, k)`
+  multivariate-normal pdf kernel, log form available).
+
+Every one of these reproduces the R package's **exact** code paths
+(including R's quirks, e.g. the `dnppois` log-path normal-term
+copy-paste and the `dnpnormc` NaNs at point-mass support points) to
+relative error ≤ 1.2e-15 on the 30-case parity set; the log-space `pgamma`
+helper was rebuilt on top of the shared regularized-gamma core to match
+R's log branch bit-for-bit (a log-space Lentz CF diverged by up to ~1e-4
+in the far tail, which the `pnppois` `lg=TRUE` gate caught).
+
+**Eigen version pinned in the docs** — the vendored Eigen under `eigen/`
+is **5.0.0** (`EIGEN_WORLD_VERSION 3`, the semver start point); this is
+now stated explicitly in §1, §2, and `docs/PERF.md`. Build, flags, and
+parity gates are unchanged.
+
+**Kernel bug fixes verified against live R 4.6.1** (the 0.2.x parity files
+predate these): `pnorm` far-tail `lg=TRUE` routing, `ppois` `±Inf`
+semantics, `pgamma` pole/sign handling, `gammln` pole/sign, the
+`logspacesub` branch, Poisson `x < 0`, `pnpt` non-log quirk, and the
+`dnppois` log-space behavior. All ten test suites in §5 report
+`TOTAL BAD: 0` on the rebuilt extension.
+
+**L-BFGS-B solver evaluated, R-identical copy kept** — alternative
+solvers for the per-cell search of `npnorm2Dll` were evaluated (the
+rejected ones are **not** vendored into the package; nothing was added
+to the tree):
+
+* **CppNumericalSolvers' `LbfgsbSolver`** (GPL/MIT dual) was measured
+  live via a temporary adapter and then removed: it is a different
+  implementation (hard-coded 1e-4 projected-gradient test vs LBFGSpp's
+  tolerance, an unbounded More–Thuente step clamped to the box
+  afterwards, a dense `M.inverse()` history update) and on the n=300
+  2-D run it converged **later** — 20.1 s vs 8.2 s, 1.96 M vs 0.77 M
+  objective evaluations — to a different (valid) optimum (ll
+  982.75623387 vs 982.75623351), i.e. it breaks the match-to-R
+  trajectory.
+* **NLopt** (not installed in this environment): its `LD_LBFGS` is a C
+  port of the same LBFGS-B with a per-evaluation C-callback hop; it is
+  the same algorithmic behavior plus overhead, with no convergence
+  advantage.
+* **A wider literature sweep** (LMBOPT, box-constrained L-MQN /
+  projected-gradient families, Nelder–Mead, and mixture-model
+  support-search alternatives) found nothing that both converges faster
+  **and** keeps the R-matching trajectory: the best bound-constrained
+  solvers (LMBOPT, ASACG, box L-BFGS variants) are CUTEst-scale
+  algorithms whose edge shows up in high dimensions, and LMBOPT is
+  Matlab-only in its published form; Nelder–Mead is gradient-free and
+  O(ε⁻²); the statistical alternatives (directional-derivative
+  screening on a grid, Metropolis–Hastings candidate selection,
+  support-reduction / vertex-direction active-set methods) change the
+  selection *algorithm* itself, i.e. the R trajectory by construction.
+  Details in [`docs/PERF.md`](docs/PERF.md) §4a.1.
+* **Unifying the `d0`/`d1` gradient flags** into one 3-vector was
+  considered and rejected as a *cosmetic* change only — every 1-D
+  family always requests the full pair, and the `d0`-only branch exists
+  solely for R's `npnorm2Dll` gradient convention (d0 = probability
+  direction, d1 = support-point directions); collapsing them would not
+  alter any trajectory and buys nothing measurable.
+
+### 0.2.1 更新内容（相对 0.2.0）
+
+**新增：二维族 `npnorm2Dll`** —— 双变量正态混合分布，经
+`computemixdist(v, method="npnorm2Dll", beta=...)` 调用，移植 R 的
+`computemixdist.npnorm2Dll`（含其实验性 L-BFGS-B 支撑点搜索、`(n, 2)`
+数据约定、协方差矩阵 `beta` 与固定分量参数 `mu0`/`pi0`）：
+
+* `v` 为 `(n, 2)` 数组（长度 `2n` 的扁向量会被自动重塑）；
+* `beta` 为 `2 x 2` 协方差矩阵（默认单位阵）；
+* `mix` / `gridpoints` 接受二维形式 `{"pt": (k, 2), "pr": (k,)}`；缺省时
+  与 R 的包装器完全一致地构造默认值（逐边缘 `initial.npnorm` /
+  `gridpoints.npnorm`，张量积组合）；
+* 返回 `Npmix`，其 `pt` 为 `(x, y)` 点对列表，`beta` 存放协方差矩阵。
+
+**新增：一维混合密度/分布函数核（R 的 `dnp*` / `pnp*` 层）** ——
+顶层导出，全部由 C++/Eigen 核支撑：
+
+* `dnpnorm`、`pnpnorm`、`dnpnormc`、`dnpt`、`pnpt`、`dnpdiscnorm`、
+  `pnpdiscnorm`、`dnppois`、`pnppois`、`dnpdisct`（一维族，均含 `lg`
+  对数空间形式）；
+* `dnpnormND`（二维混合密度）与 `dnormNDarray`（`(n, k)` 多元正态 pdf
+  核，可选对数形式）。
+
+上述每个函数都精确复现 R 包的**原始代码路径**（包括 R 的怪癖，如
+`dnppois` 对数路径的正态项复制粘贴错误、`dnpnormc` 在点质量支撑点处
+的 NaN），在 30 例对拍集上相对误差 ≤ 1.2e-15；对数空间 `pgamma` 辅助
+函数改为基于共享正则化伽马核重建，与 R 的对数分支逐位一致（此前对数
+空间 Lentz CF 在远尾偏差高达 ~1e-4，被 `pnppois` 的 `lg=TRUE` 门捕获）。
+
+**文档中明确标注 Eigen 版本** —— `eigen/` 下 vendored 的 Eigen 为
+**5.0.0**（`EIGEN_WORLD_VERSION 3`，semver 起点），现已在 §1、§2 与
+`docs/PERF.md` 中显式标注；构建参数与 parity 门不变。
+
+**针对 R 4.6.1 实测的内核修正**（0.2.x 的对拍文件早于这些修正）：
+`pnorm` 远尾 `lg=TRUE` 路由、`ppois` 的 `±Inf` 语义、`pgamma` 极点/符号
+处理、`gammln` 极点/符号、`logspacesub` 分支、Poisson `x < 0`、`pnpt`
+非对数怪癖、`dnppois` 对数空间行为。重建后 §5 全部 10 个测试套件报告
+`TOTAL BAD: 0`。
+
+**L-BFGS-B 求解器评估结论：保留 R 同款** —— 评估了
+`npnorm2Dll` 逐格搜索的替代求解器（被否决的方案**没有**被 vendored
+进包，代码树未新增任何外部依赖）：
+
+* **CppNumericalSolvers 的 `LbfgsbSolver`**（GPL/MIT 双许可）曾通过
+  临时适配器实测、随后撤出：它是另一实现（投影梯度容差硬编码 1e-4
+  而 LBFGSpp 用 tol；More–Thuente 线搜索无界、步长事后才 clamp 回
+  盒内；历史更新用稠密 `M.inverse()` 重建）且 n=300 二维实测**收敛
+  更晚** —— 20.1 s vs 8.2 s、目标函数求值 1.96 M vs 0.77 M，最优解
+  不同（ll 982.75623387 vs 982.75623351），即打破与 R 的轨迹一致。
+* **NLopt**（本环境未安装）：其 `LD_LBFGS` 是同一 LBFGS-B 的 C 移植，
+  带逐次求值的 C 回调开销，算法行为相同、无收敛优势。
+* **更广的文献调研**（LMBOPT、盒约束 L-MQN / 投影梯度族、Nelder–Mead、
+  以及混合模型支撑点搜索的算法级替代）没有找到既**收敛更快**又保持
+  R 轨迹一致的方案：盒约束最优求解器（LMBOPT、ASACG、box L-BFGS
+  变体）的优势在高维才显现，且 LMBOPT 发表形态为 Matlab；Nelder–Mead
+  无梯度、复杂度 O(ε⁻²)；统计侧替代（网格方向导数筛查、Metropolis–
+  Hastings 候选选择、支撑缩减 / 顶点方向活跃集法）改变的是选择
+  算法本身，即构造上就会改变 R 的轨迹。详见
+  [`docs/PERF.md`](docs/PERF.md) §4a.1。
+* **unify(d0/d1)**：把 `gradfun` 的 `d0`/`d1` 两个标志合并成一个 3
+  向量被评估后**否决**——一维各族永远取全量梯度对，`d0`-only 分支只
+  为 R `npnorm2Dll` 的梯度约定（d0 = 概率方向，d1 = 支撑点方向）而
+  存在，合并纯属表面改动，不改变任何轨迹、也无可测收益。
+
+### What's new in 0.2.0 (vs 0.1.0)
 
 **New: the four binned ("`...w`") families** — `npnormllw`,
 `npnormcvmw`, `npnormadw`, `nptllw` (for `computemixdist` **and**
@@ -138,7 +310,7 @@ t family 8–14× ahead of R; all parity gates stay green (see
   binned bench pair (`tests/bench_binned.py` / `tests/bench_binned_r.R`)
   are part of the standard test set (10 suites, §5).
 
-### 0.2.0 更新内容（相对 0.1.0）
+#### 0.2.0 更新内容（相对 0.1.0）
 
 **新增：四个分箱（``"...w"``）族** —— `npnormllw`、`npnormcvmw`、
 `npnormadw`、`nptllw`（`computemixdist` **和** `estpi0` 均支持）：
@@ -309,6 +481,11 @@ resb = computemixdist(x, method="npnormllw", order=-3)
 
 # fixed components: (mu0, pi0) included in the mixture, never updated
 resf = computemixdist(x, method="npnormll", mu0=-0.5, pi0=0.3)
+
+# bivariate normal mixture (experimental; slow — see §6)
+from numpy import eye
+res2d = computemixdist(np.column_stack([x, rng.normal(size=1000)]),
+                       method="npnorm2Dll", beta=eye(2))
 ```
 
 ### 快速上手
@@ -335,6 +512,10 @@ resb = computemixdist(x, method="npnormllw", order=-3)
 
 # 固定分量：(mu0, pi0) 参与混合、从不更新
 resf = computemixdist(x, method="npnormll", mu0=-0.5, pi0=0.3)
+
+# 双变量正态混合（实验性，较慢——见 §6）
+res2d = computemixdist(np.column_stack([x, rng.normal(size=1000)]),
+                       method="npnorm2Dll", beta=np.eye(2))
 ```
 
 ### API
@@ -400,6 +581,31 @@ Also exported for the R-package correspondence layer: `posteriormean`,
 `__version__`. See the module docstrings in `python/npfixedcomppy/` for
 the full parameter reference.
 
+**Mixture density / cdf kernels (the R `dnp*` / `pnp*` layer)** — all run
+in the C++/Eigen core, take array-like `x`/`mu0`/`pi0`, and return an
+`ndarray`:
+
+| function | meaning (R name in `x`) |
+|----------|--------------------------|
+| `dnpnorm(x, mu0, pi0, stdev=1.0, lg=False)` | normal mixture pdf (R `dnpnorm`) |
+| `pnpnorm(x, mu0, pi0, stdev=1.0, lt=True, lg=False)` | normal mixture cdf (R `pnpnorm`) |
+| `dnpnormc(x, mu0, pi0, n, lg=False)` | one-parameter normal (correlation) pdf — `npnormcll` kernel (R `dnpnormc`) |
+| `dnpt(x, mu0, pi0, df, lg=False)` | non-central-t mixture pdf — `nptll` kernel (R `dnpt`) |
+| `pnpt(x, mu0, pi0, df, lt=True, lg=False)` | non-central-t mixture cdf (R `pnpt`) |
+| `dnpdiscnorm(x, mu0, pi0, stdev, h, lg=False)` | binned normal mixture pdf — `...w` normal families (R `dnpdiscnorm`) |
+| `pnpdiscnorm(x, mu0, pi0, stdev, h, lt=True, lg=False)` | binned normal mixture cdf (R `pnpdiscnorm`) |
+| `dnppois(x, mu0, pi0, stdev=1.0, lg=False)` | Poisson mixture pdf — `nppoisll` kernel (R `dnppois`; `stdev` only reaches the `lg` normal-term quirk) |
+| `pnppois(x, mu0, pi0, lt=True, lg=False)` | Poisson mixture cdf (R `pnppois`) |
+| `dnpdisct(x, mu0, pi0, df, h, lg=False)` | binned t mixture pdf — `nptllw` kernel (R `dnpdisct`) |
+| `dnpnormND(x, mu0, pi0, sigma, lg=False)` | 2-D (bivariate) normal mixture pdf — `npnorm2Dll` kernel (R `dnpnormND`) |
+| `dnormNDarray(x, mu0, sigma, lg=False)` | the `(n, k)` multivariate-normal pdf kernel (R `dnormNDarray_`) |
+
+These reproduce R's exact code paths — including its quirks (the
+`dnppois` `lg` path adds a normal term for the extra support points;
+`dnpnormc` is NaN at point-mass support points) — to relative error
+≤ 1.2e-15 against live R 4.6.1 (30-case gold set,
+`tests/verify_kernels.py`).
+
 ### API
 
 **`computemixdist(v, method="npnormll", mu0=None, pi0=None, beta=None,
@@ -452,6 +658,29 @@ inner_tol=1e-4) -> Npmix`**
 （`CovEBResult`）、`FAMILIES` 注册表与 `__version__`。完整参数说明见
 `python/npfixedcomppy/` 中的模块 docstring。
 
+**混合密度 / 分布函数核（R 的 `dnp*` / `pnp*` 层）** —— 全部运行于
+C++/Eigen 核，接受 array-like 的 `x`/`mu0`/`pi0`，返回 `ndarray`：
+
+| 函数 | 含义（括号内为 R 函数名） |
+|------|---------------------------|
+| `dnpnorm(x, mu0, pi0, stdev=1.0, lg=False)` | 正态混合 pdf（R `dnpnorm`） |
+| `pnpnorm(x, mu0, pi0, stdev=1.0, lt=True, lg=False)` | 正态混合 cdf（R `pnpnorm`） |
+| `dnpnormc(x, mu0, pi0, n, lg=False)` | 一参数正态（相关）pdf —— `npnormcll` 核（R `dnpnormc`） |
+| `dnpt(x, mu0, pi0, df, lg=False)` | 非中心 t 混合 pdf —— `nptll` 核（R `dnpt`） |
+| `pnpt(x, mu0, pi0, df, lt=True, lg=False)` | 非中心 t 混合 cdf（R `pnpt`） |
+| `dnpdiscnorm(x, mu0, pi0, stdev, h, lg=False)` | 分箱正态混合 pdf —— `...w` 正态族（R `dnpdiscnorm`） |
+| `pnpdiscnorm(x, mu0, pi0, stdev, h, lt=True, lg=False)` | 分箱正态混合 cdf（R `pnpdiscnorm`） |
+| `dnppois(x, mu0, pi0, stdev=1.0, lg=False)` | 泊松混合 pdf —— `nppoisll` 核（R `dnppois`；`stdev` 仅出现在 `lg` 的正态项怪癖中） |
+| `pnppois(x, mu0, pi0, lt=True, lg=False)` | 泊松混合 cdf（R `pnppois`） |
+| `dnpdisct(x, mu0, pi0, df, h, lg=False)` | 分箱 t 混合 pdf —— `nptllw` 核（R `dnpdisct`） |
+| `dnpnormND(x, mu0, pi0, sigma, lg=False)` | 双变量正态混合 pdf —— `npnorm2Dll` 核（R `dnpnormND`） |
+| `dnormNDarray(x, mu0, sigma, lg=False)` | `(n, k)` 多元正态 pdf 核（R `dnormNDarray_`） |
+
+它们精确复现 R 的原始代码路径——包括 R 的怪癖（`dnppois` 的 `lg`
+路径对额外支撑点加入正态项；`dnpnormc` 在点质量支撑点处为 NaN）——
+在 30 例金标集上（`tests/verify_kernels.py`）相对误差 ≤ 1.2e-15
+（对照 R 4.6.1 实测值）。
+
 ## 5. Testing & parity with R
 
 Run from the package root with the venv's Python (script-style, each
@@ -480,11 +709,20 @@ exits non-zero on failure):
   1e-2).
 - `python tests\verify_posteriormean.py` — posterior means of `fun(pt)`
   against R-recorded values (strict 1e-9 on the pure kernel path).
+- `python tests\verify_kernels.py` — the 30-case 1-D/2-D **kernel**
+  parity gate (`dnp*` / `pnp*` / `dnormNDarray` against live R 4.6.1
+  gold values; finite values ≤ 1.2e-15 relative, NaNs at identical
+  positions).
+- `python tests\verify_2d_same.py` — the `npnorm2Dll` gate: determinism,
+  convergence, `ll` self-consistency, and **kernel** parity (PY's
+  `dnpnormND` at R's final points reproduces R's ll to 1e-9), plus a
+  no-worse-than-R local-optimum check (the L-BFGS-B trajectory
+  difference is documented in [`docs/PERF.md`](docs/PERF.md)).
 - `python tests\perf_baseline.py` — wall-time baseline of the public API.
 - `python tests\bench_binned.py` — wall-time bench for the binned
   families (the R-side counterpart is `tests\bench_binned_r.R`).
 
-All eight parity suites must report `TOTAL BAD: 0`. The package is
+All ten parity suites must report `TOTAL BAD: 0`. The package is
 **deterministic per build**: for a fixed build and a fixed
 `OMP_NUM_THREADS`, identical inputs produce bit-identical outputs (unlike
 the R package on parallel platforms).
@@ -513,11 +751,18 @@ the R package on parallel platforms).
   R 录制的中间量（投影基元严格门，管线 1e-2）。
 - `python tests\verify_posteriormean.py` — `fun(pt)` 的后验均值对比
   R 录制的值（纯核路径严格 1e-9）。
+- `python tests\verify_kernels.py` — 30 例一维/二维**核**对拍门
+  （`dnp*` / `pnp*` / `dnormNDarray` 对比 R 4.6.1 实测金标值；有限值
+  相对误差 ≤ 1.2e-15，NaN 位置一致）。
+- `python tests\verify_2d_same.py` — `npnorm2Dll` 门：确定性、收敛、
+  `ll` 自洽，以及**核**对拍（PY 的 `dnpnormND` 在 R 最终点上复现 R 的
+  ll 至 1e-9），并校验 PY 的局部最优不劣于 R（L-BFGS-B 轨迹差异见
+  [`docs/PERF.md`](docs/PERF.md)）。
 - `python tests\perf_baseline.py` — 公开 API 的耗时基线。
 - `python tests\bench_binned.py` — 分箱族耗时 bench（R 侧对应脚本为
   `tests\bench_binned_r.R`）。
 
-八个 parity 套件必须全部报告 `TOTAL BAD: 0`。本包对**给定构建与线程数**
+十个 parity 套件必须全部报告 `TOTAL BAD: 0`。本包对**给定构建与线程数**
 是确定性的：相同输入恒产生逐位相同的输出（并行平台上的 R 包做不到这一
 点）。
 
@@ -539,6 +784,7 @@ this build (median of 5, warmup excluded):
 | `computemixdist(x, method="npnormad")`, n=1000 | ≈ 38 ms | ≈ 59 ms |
 | `computemixdist(x, method="nppoisll")`, n=1000 | ≈ 0.6 ms | ≈ 5 ms |
 | `estpi0(x, method="npnormll")`, n=1000 | ≈ 29 ms | ≈ 97 ms |
+| `computemixdist(X, method="npnorm2Dll")`, n=300 (2-D) | ≈ 4.3 s | ≈ 0.8 s |
 
 Binned (`order = -3`, i.e. `h = 10^-3`):
 
@@ -552,6 +798,20 @@ Binned (`order = -3`, i.e. `h = 10^-3`):
 
 \* `npnormadw` fits wander between basins run-to-run in both
 implementations, so this ratio is indicative.
+
+The 2-D row above is the documented *exception*: `npnorm2Dll` is an
+experimental family whose per-outer-iteration support-point search
+launches one L-BFGS-B problem **per grid cell** (103 × 103 for the
+default grid) and, unlike the 1-D engine, it does not use the kernel
+column cache. A hand-unrolled 2×2 fast path in the density kernel
+(cutting `dnpnormND` from ≈ 0.4 ms/call to ≈ 7.4 µs/call at n=300 —
+the old ~28× gap's main source, since MSVC keeps the per-point heap
+temporaries that the R build's GCC eliminates) now leaves the residual
+~5.7× wall-time ratio in the per-cell L-BFGS-B machinery and the
+per-evaluation gradient temporaries (≈ 422,000 objective evaluations for
+the n=300 reference run); the kernels themselves remain bit-exact with R
+and the fit trajectory is unchanged. See
+[`docs/PERF.md`](docs/PERF.md) for the breakdown.
 
 For the `t` family with small degrees of freedom the cost grows with `n`
 (super-linearly — the per-point `dnt` kernel has no cheap identity), so
@@ -584,6 +844,7 @@ OpenMP 探测通过时启用 Eigen 自身的并行 GEMM/GEMV）；内核列缓�
 | `computemixdist(x, method="npnormad")`，n=1000 | ≈ 38 ms | ≈ 59 ms |
 | `computemixdist(x, method="nppoisll")`，n=1000 | ≈ 0.6 ms | ≈ 5 ms |
 | `estpi0(x, method="npnormll")`，n=1000 | ≈ 29 ms | ≈ 97 ms |
+| `computemixdist(X, method="npnorm2Dll")`，n=300（二维） | ≈ 4.3 s | ≈ 0.8 s |
 
 分箱（`order = -3`，即 `h = 10^-3`）：
 
@@ -596,6 +857,15 @@ OpenMP 探测通过时启用 Eigen 自身的并行 GEMM/GEMV）；内核列缓�
 | `estpi0(x, method="npnormllw")`，n=5000 | ≈ 563 ms | ≈ 1.33 s |
 
 \* `npnormadw` 在两侧实现中都存在逐次运行的 basin 漂移，该比值仅作参考。
+
+上表 2-D 一行是**有记录的例外**：`npnorm2Dll` 是实验性族，其每轮外层
+迭代的支撑点搜索对**每个网格单元**各启动一个 L-BFGS-B 问题（默认网格
+103 × 103），且与一维引擎不同，它不使用内核列缓存。密度内核现已有手写
+展开的 2×2 快路径（`dnpnormND` 从 ≈ 0.4 ms/次降到 ≈ 7.4 µs/次，n=300——
+旧 ~28× 差距的主要来源：MSVC 保留了逐点堆临时对象，而 R 构建的 GCC 会
+消除它们），现在残余的 ~5.7× 墙钟差距落在逐格 L-BFGS-B 机制与逐次求值
+的梯度临时对象上（n=300 参考运行约 422,000 次目标函数求值），核本身仍
+逐位一致、拟合轨迹不变。分解见 [`docs/PERF.md`](docs/PERF.md)。
 
 t 族在小自由度下 `dnt` 核没有廉价恒等式，成本随 `n` 超线性增长，`n` 很
 大时较慢；正态族为线性。分箱正态族与 R 的分箱耗时相差约 25% 以内（列

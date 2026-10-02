@@ -25,8 +25,10 @@ the compiler is probe-compiled with the OpenMP flag and, when it supports
 the flag, the flag is added to the extension build so Eigen's
 ``EIGEN_HAS_OPENMP`` gate turns on its internal parallel loops. When the
 compiler (or the flag) is unavailable, the build falls back to serial Eigen.
-No project source file is ever modified for threading — only this build-time
-flag decision.
+``NPFIC_OPENMP=0`` forces a serial build even when the compiler supports
+OpenMP (the flag used for reproducible single-core speed measurements
+against the single-threaded R package). No project source file is ever
+modified for threading — only this build-time flag decision.
 """
 
 import os
@@ -159,8 +161,18 @@ def _openmp_supported() -> bool:
         return False
 
 
+# NPFIC_OPENMP=0 forces a serial Eigen build even when the compiler
+# supports OpenMP — the single-core configuration used for the speed
+# comparison against the single-threaded R package.
+_force_serial = os.environ.get("NPFIC_OPENMP", "").strip() == "0"
+
 _omp_flag = _OMP_FLAG["msvc" if platform.system() == "Windows" else "unix"]
-if _openmp_supported():
+if _force_serial:
+    print(
+        "npfixedcomppy: NPFIC_OPENMP=0 — forcing serial Eigen "
+        "(skipping OpenMP even if the compiler supports it)"
+    )
+elif _openmp_supported():
     # The OpenMP flag goes on the compile (and, for the unix linkers, the
     # link) line: it defines _OPENMP, which is the whole of Eigen's
     # threading gate. No project source changes are involved.
@@ -188,7 +200,7 @@ ext = Extension(
 
 setup(
     name="npfixedcomppy",
-    version="0.2.0",
+    version="0.2.1",
     description=(
         "Non-parametric estimation of mixing distributions with fixed "
         "components (C++/Eigen + pybind11 port of the R package npfixedcomp2)"

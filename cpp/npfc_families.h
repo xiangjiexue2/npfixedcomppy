@@ -223,6 +223,40 @@ inline Eigen::MatrixXd kmat_cached_recip(const kern::KernelColumnCache& kc,
     return K;
 }
 
+// A (n x m) kernel-matrix fill keyed on the exact `mu` vector. The (sorted)
+// grid matrix is pinned once by the family's `prepare`; every other fill is
+// memoised in a single slot. `get` returns a matrix BIT-IDENTICAL to
+// `fill(mu)` — a stored matrix is served only when `mu` is element-exact to
+// one already computed. That is the only safe key for the binned normal
+// kernels: the trapezoid `N` and the CDF-shift direction both depend on the
+// whole support set, so no weaker key may be used. The outer loop re-requests
+// exactly a small set of repeating vectors (the grid, the current support
+// set, a few solver-interior points), so after the first iteration nearly
+// every call is a hit and only redundant re-evaluation is removed — never
+// arithmetic.
+struct KernelMemo {
+    template <typename Fill>
+    const Eigen::MatrixXd& get(const std::vector<double>& mu, Fill fill) const {
+        if (!grid.empty() && mu == grid)
+            return grid_m;
+        if (last_mu == mu)
+            return last_m;
+        last_mu = mu;
+        last_m = fill(mu);
+        return last_m;
+    }
+    mutable std::vector<double> grid, last_mu;
+    mutable Eigen::MatrixXd grid_m, last_m;
+};
+
+// The shared empty (0 x 0) matrix for lvalue-bound ternaries
+// (`cond ? pmat(mu) : detail::empty_m()`): a prvalue operand would dangle
+// the bound reference.
+inline const Eigen::MatrixXd& empty_m() {
+    static const Eigen::MatrixXd k(0, 0);
+    return k;
+}
+
 // Copy a dense Eigen vector into an owning std::vector (the seam for results
 // crossing back into the std::vector-based family API).
 inline std::vector<double> to_vec(const Eigen::VectorXd& v) {
@@ -1528,6 +1562,24 @@ public:
           precompute_(kern::dnpdiscnorm(data_, mu0fixed_, pi0fixed_, beta_,
                                         h_)) {}
 
+    void prepare(const std::vector<double>& grid) override {
+        // The binned trapezoid-density matrix depends only on
+        // (data, mu, beta, h) — never on pi0/dens — and the outer loop
+        // re-requests it with repeating mu vectors: the per-iteration
+        // grid sweep (solvegrad) with the (sorted) grid itself, plus the
+        // mapping/collapse/computeweights passes over the current support
+        // set. Pin the grid matrix here (bit-identical to the fresh
+        // fill with the same arguments); `dmat` serves it on every later
+        // grid sweep and memoises the small support-set fills. (The
+        // run-wide COLUMN cache does not apply: the trapezoid
+        // subdivision count N depends on the whole mu range, see the
+        // `ddiscnorm_m` note.)
+        if (!grid.empty()) {
+            dmemo_.grid = grid;
+            dmemo_.grid_m = kern::ddiscnorm_m(data_, grid, beta_, h_);
+        }
+    }
+
     const std::vector<double>& precompute() const override {
         return precompute_;
     }
@@ -1541,7 +1593,18 @@ public:
 
     std::vector<double> mapping(const std::vector<double>& mu0,
                                 const std::vector<double>& pi0) const override {
-        return kern::dnpdiscnorm(data_, mu0, pi0, beta_, h_);
+        const std::size_t n = len_;
+        if (mu0.empty())
+            return std::vector<double>(n, 0.0);
+        const Eigen::MatrixXd& D = dmat(mu0);
+        std::vector<double> out(n, 0.0);
+        for (std::size_t i = 0; i < n; ++i) {
+            double s = 0.0;
+            for (std::size_t j = 0; j < mu0.size(); ++j)
+                s += D(i, j) * pi0[j];
+            out[i] = s;
+        }
+        return out;
     }
 
     // Only the probability-direction gradient `a0` is defined (the R class
@@ -1555,9 +1618,12 @@ public:
         }
         const double scale = 1.0 - sum_pi0fixed();
         // temp = dnpdiscnorm_(data, mu, scale, beta, h): the single support
-        // point `mu` carrying the remaining mass `scale`.
-        const std::vector<double> temp =
-            kern::dnpdiscnorm(data_, {mu}, {scale}, beta_, h_);
+        // point `mu` carrying the remaining mass `scale` (column j * pi0[j],
+        // single column — the i-outer/j-inner accumulation of `dnpdiscnorm`).
+        const Eigen::MatrixXd& D = dmat({mu});
+        std::vector<double> temp(len_);
+        for (std::size_t i = 0; i < len_; ++i)
+            temp[i] = D(i, 0) * scale;
         double s = 0.0;
         for (std::size_t i = 0; i < len_; ++i)
             s += (dens[i] - temp[i]) * weights_[i] / (dens[i] + precompute_[i]);
@@ -1585,7 +1651,7 @@ public:
             fullden[i] = fl;
             dens_dot += dens[i] * fl;
         }
-        const Eigen::MatrixXd D = kern::ddiscnorm_m(data_, mu, beta_, h_);
+        const Eigen::MatrixXd& D = dmat(mu);
         const Eigen::Map<const Eigen::VectorXd> fv(fullden.data(),
                                                    static_cast<Eigen::Index>(n));
         const Eigen::VectorXd kfl = D.transpose() * fv;
@@ -1604,7 +1670,7 @@ public:
         std::vector<double> fp(n);
         for (std::size_t i = 0; i < n; ++i)
             fp[i] = dens[i] + precompute_[i];
-        const Eigen::MatrixXd sp = kern::ddiscnorm_m(data_, mu0, beta_, h_);
+        const Eigen::MatrixXd& sp = dmat(mu0);
         std::vector<double> wsq(n);
         for (std::size_t i = 0; i < n; ++i)
             wsq[i] = std::sqrt(weights_[i]);
@@ -1664,12 +1730,24 @@ public:
     double beta_value() const override { return beta_; }
 
 private:
+    // The (n x m) trapezoid-density fill for `mu` through the memo
+    // (`detail::KernelMemo`): a served matrix is bit-identical to a fresh
+    // `ddiscnorm_m(data, mu, beta, h)` (exact mu-vector key; see the note
+    // above the binned families).
+    const Eigen::MatrixXd& dmat(const std::vector<double>& mu) const {
+        return dmemo_.get(mu, [this](const std::vector<double>& v) {
+            return kern::ddiscnorm_m(data_, v, beta_, h_);
+        });
+    }
+
     double sum_pi0fixed() const {
         double s = 0.0;
         for (double v : pi0fixed_)
             s += v;
         return s;
     }
+
+    mutable detail::KernelMemo dmemo_;
 
     std::vector<double> data_;
     std::size_t len_;
@@ -1699,6 +1777,19 @@ public:
         recompute_pre();
     }
 
+    void prepare(const std::vector<double>& grid) override {
+        // Pin the binned cdf AND density grid matrices (see `detail::
+        // KernelMemo`): the per-iteration `solvegradd1` requests each of
+        // them for the (sorted) grid, and the mapping/collapse/
+        // computeweights passes reuse the last small support-set fill.
+        if (!grid.empty()) {
+            pmemo_.grid = grid;
+            pmemo_.grid_m = kern::pnorm_disc_m(data_, grid, beta_, h_);
+            dmemo_.grid = grid;
+            dmemo_.grid_m = kern::ddiscnorm_m(data_, grid, beta_, h_);
+        }
+    }
+
     const std::vector<double>& precompute() const override {
         return precompute_;
     }
@@ -1714,7 +1805,20 @@ public:
 
     std::vector<double> mapping(const std::vector<double>& mu0,
                                 const std::vector<double>& pi0) const override {
-        return kern::pnpdiscnorm(data_, mu0, pi0, beta_, h_);
+        // `pnpdiscnorm`: P * pi0 as the i-outer/j-inner accumulation
+        // (bit-identical; the cdf columns come from the memo).
+        const std::size_t n = len_;
+        if (mu0.empty())
+            return std::vector<double>(n, 0.0);
+        const Eigen::MatrixXd& P = pmat(mu0);
+        std::vector<double> out(n, 0.0);
+        for (std::size_t i = 0; i < n; ++i) {
+            double s = 0.0;
+            for (std::size_t j = 0; j < mu0.size(); ++j)
+                s += P(i, j) * pi0[j];
+            out[i] = s;
+        }
+        return out;
     }
 
     void gradfun(double mu, const std::vector<double>& dens, bool d0, bool d1,
@@ -1733,18 +1837,18 @@ public:
         // Phi_disc(mu; scale) is the single-point binned-cdf mixture.
         double sum_new = 0.0;
         if (d0) {
-            const std::vector<double> pcol =
-                kern::pnpdiscnorm(data_, {mu}, {scale}, beta_, h_);
+            // pcol = P({mu}) * scale (single column, as `pnpdiscnorm`).
+            const Eigen::MatrixXd& P = pmat({mu});
             for (std::size_t i = 0; i < n; ++i)
-                sum_new += (pcol[i] - dens[i]) * fullden[i];
+                sum_new += (P(i, 0) * scale - dens[i]) * fullden[i];
         }
-        // d1: -2*scale * sum_i N_disc(x_i; mu) * fullden[i] (binned pdf).
+        // d1: -2*scale * sum_i N_disc(x_i; mu) * fullden[i] (binned pdf,
+        // pi0 = 1.0 in the `dnpdiscnorm` single column).
         double sum_d1 = 0.0;
         if (d1) {
-            const std::vector<double> dcol =
-                kern::dnpdiscnorm(data_, {mu}, {1.0}, beta_, h_);
+            const Eigen::MatrixXd& D = dmat({mu});
             for (std::size_t i = 0; i < n; ++i)
-                sum_d1 += dcol[i] * fullden[i];
+                sum_d1 += D(i, 0) * 1.0 * fullden[i];
         }
         a0 = d0 ? sum_new * 2.0 : 0.0;
         a1 = d1 ? sum_d1 * (-2.0 * scale) : 0.0;
@@ -1766,10 +1870,8 @@ public:
         const bool do0 = d0, do1 = d1;
         if (!do0 && !do1)
             return;
-        const Eigen::MatrixXd P =
-            do0 ? kern::pnorm_disc_m(data_, mu, beta_, h_) : Eigen::MatrixXd();
-        const Eigen::MatrixXd D =
-            do1 ? kern::ddiscnorm_m(data_, mu, beta_, h_) : Eigen::MatrixXd();
+        const Eigen::MatrixXd& P = do0 ? pmat(mu) : detail::empty_m();
+        const Eigen::MatrixXd& D = do1 ? dmat(mu) : detail::empty_m();
         for (std::size_t j = 0; j < m; ++j) {
             if (do0) {
                 double s = 0.0;
@@ -1793,7 +1895,7 @@ public:
             return;
         const std::size_t n = len_;
         const double scale = 1.0 - sum_pi0fixed();
-        const Eigen::MatrixXd P = kern::pnorm_disc_m(data_, mu0, beta_, h_);
+        const Eigen::MatrixXd& P = pmat(mu0);
         std::vector<double> wsq(n);
         for (std::size_t i = 0; i < n; ++i)
             wsq[i] = std::sqrt(weights_[i]);
@@ -1855,12 +1957,32 @@ private:
         }
     }
 
+    // The (n x m) binned-cdf / trapezoid-density fills for `mu` through the
+    // memo (`detail::KernelMemo`): a served matrix is bit-identical to a
+    // fresh fill with the same arguments (exact mu-vector key).
+    const Eigen::MatrixXd& pmat(const std::vector<double>& mu) const {
+        return pmemo_.get(mu, [this](const std::vector<double>& v) {
+            return kern::pnorm_disc_m(data_, v, beta_, h_);
+        });
+    }
+    const Eigen::MatrixXd& dmat(const std::vector<double>& mu) const {
+        return dmemo_.get(mu, [this](const std::vector<double>& v) {
+            return kern::ddiscnorm_m(data_, v, beta_, h_);
+        });
+    }
+
     double sum_pi0fixed() const {
         double s = 0.0;
         for (double v : pi0fixed_)
             s += v;
         return s;
     }
+
+    // Both the binned-cdf memo (d0 direction, `pmat`) and the
+    // trapezoid-density memo (d1 direction, `dmat`) are pinned to the grid in
+    // `prepare` and reused on every small support-set fill.
+    mutable detail::KernelMemo pmemo_;
+    mutable detail::KernelMemo dmemo_;
 
     std::vector<double> data_;
     std::size_t len_;
@@ -1901,6 +2023,18 @@ public:
         recompute_pre();
     }
 
+    void prepare(const std::vector<double>& grid) override {
+        // Pin the binned-cdf grid matrix (see `detail::KernelMemo`): the
+        // per-iteration `solvegradd1` d0 pass requests it for the (sorted)
+        // grid; mapping/collapse/computeweights reuse the last small
+        // support-set fill. (ADW's d1 direction uses the UNBINNED normal
+        // pdf pointwise — no matrix to pin.)
+        if (!grid.empty()) {
+            pmemo_.grid = grid;
+            pmemo_.grid_m = kern::pnorm_disc_m(data_, grid, beta_, h_);
+        }
+    }
+
     const std::vector<double>& precompute() const override {
         return precompute_;
     }
@@ -1914,7 +2048,20 @@ public:
 
     std::vector<double> mapping(const std::vector<double>& mu0,
                                 const std::vector<double>& pi0) const override {
-        return kern::pnpdiscnorm(data_, mu0, pi0, beta_, h_);
+        // `pnpdiscnorm`: P * pi0 as the i-outer/j-inner accumulation
+        // (bit-identical; the cdf columns come from the memo).
+        const std::size_t n = len_;
+        if (mu0.empty())
+            return std::vector<double>(n, 0.0);
+        const Eigen::MatrixXd& P = pmat(mu0);
+        std::vector<double> out(n, 0.0);
+        for (std::size_t i = 0; i < n; ++i) {
+            double s = 0.0;
+            for (std::size_t j = 0; j < mu0.size(); ++j)
+                s += P(i, j) * pi0[j];
+            out[i] = s;
+        }
+        return out;
     }
 
     void gradfun(double mu, const std::vector<double>& dens, bool d0, bool d1,
@@ -1932,10 +2079,10 @@ public:
         }
         double s1_dot_new = 0.0, sum_w2_term = 0.0;
         if (d0) {
-            const std::vector<double> pcol =
-                kern::pnpdiscnorm(data_, {mu}, {scale}, beta_, h_);
+            // pcol[i] = P(i, 0) * scale (single column, as `pnpdiscnorm`).
+            const Eigen::MatrixXd& P = pmat({mu});
             for (std::size_t i = 0; i < n; ++i) {
-                s1_dot_new += s1[i] * (pcol[i] + precompute_[i]);
+                s1_dot_new += s1[i] * (P(i, 0) * scale + precompute_[i]);
                 sum_w2_term +=
                     w2_[i] / (1.0 - (dens[i] + precompute_[i]));
             }
@@ -1974,8 +2121,7 @@ public:
                : 0.0;
         if (!d0 && !d1)
             return;
-        const Eigen::MatrixXd P =
-            d0 ? kern::pnorm_disc_m(data_, mu, beta_, h_) : Eigen::MatrixXd();
+        const Eigen::MatrixXd& P = d0 ? pmat(mu) : detail::empty_m();
         for (std::size_t j = 0; j < m; ++j) {
             if (d0) {
                 double s = 0.0;
@@ -2000,7 +2146,7 @@ public:
             return;
         const std::size_t n = len_;
         const double scale = 1.0 - sum_pi0fixed();
-        const Eigen::MatrixXd sf = kern::pnorm_disc_m(data_, mu0, beta_, h_);
+        const Eigen::MatrixXd& sf = pmat(mu0);
         std::vector<double> sp(n);
         for (std::size_t i = 0; i < n; ++i)
             sp[i] = dens[i] + precompute_[i];
@@ -2086,6 +2232,12 @@ private:
         return s;
     }
 
+    const Eigen::MatrixXd& pmat(const std::vector<double>& mu) const {
+        return pmemo_.get(mu, [this](const std::vector<double>& v) {
+            return kern::pnorm_disc_m(data_, v, beta_, h_);
+        });
+    }
+
     std::vector<double> data_;
     std::size_t len_;
     std::vector<double> weights_;
@@ -2094,6 +2246,7 @@ private:
     std::vector<double> mu0fixed_, pi0fixed_;
     std::vector<double> precompute_;
     std::vector<double> w1_, w2_;
+    mutable detail::KernelMemo pmemo_;
 };
 
 // ---------------------------------------------------------------------------
