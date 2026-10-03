@@ -520,6 +520,55 @@ inline double pnt(double t, double df, double ncp, bool lower_tail) {
     return (lower_tail != negdel) ? capped : (1.0 - capped);
 }
 
+// `DntConst`: the `df`-level constants of the non-central-t pdf, computed
+// ONCE per run (see `NpTLL`). `dnt_c` evaluates the identical formula with
+// these substituted in; every stored value is the exact result of the same
+// `std::`/`gammln` call the un-cached `dnt` performs, so `dnt_c(x, ncp, c)`
+// is bit-identical to `dnt(x, c.df, ncp)`. (`ncp` varies per call and stays
+// inline, as before.)
+struct DntConst {
+    double df = 0.0;
+    double sqrt_df2 = 0.0; // sqrt((df + 2) / df)
+    double log_df = 0.0;   // log(df)
+    double g = 0.0;        // gammln((df + 1) / 2) - gammln(df / 2)
+    bool is_normal = false; // df infinite / > 1e8: the normal fallback
+
+    static DntConst make(double df) {
+        DntConst c;
+        c.df = df;
+        c.is_normal = std::isinf(df) || df > 1e8;
+        if (!std::isnan(df) && df > 0.0 && !c.is_normal) {
+            c.sqrt_df2 = std::sqrt((df + 2.0) / df);
+            c.log_df = std::log(df);
+            c.g = gammln((df + 1.0) / 2.0) - gammln(df / 2.0);
+        }
+        return c;
+    }
+};
+
+// `dnt` with the `df` constants precomputed (see `DntConst`).
+inline double dnt_c(double x, double ncp, const DntConst& c) {
+    constexpr double M_LN_SQRT_PI = 0.5723649429247001; // R's M_LN_SQRT_PI
+
+    if (std::isnan(x) || std::isnan(c.df))
+        return nanv();
+    if (c.df <= 0.0)
+        return nanv();
+    if (ncp == 0.0)
+        return dt(x, c.df);
+    if (!isfinite(x))
+        return 0.0;
+    if (c.is_normal)
+        return dnorm(x, ncp, 1.0);
+    const double u = (std::abs(x) > std::sqrt(c.df * DBL_EPSILON))
+                         ? (c.log_df - std::log(std::abs(x)) +
+                            std::log(std::abs(pnt(x * c.sqrt_df2, c.df + 2.0,
+                                                  ncp, true) -
+                                             pnt(x, c.df, ncp, true))))
+                         : (c.g - (M_LN_SQRT_PI + 0.5 * (c.log_df + ncp * ncp)));
+    return std::exp(u);
+}
+
 // Non-central t pdf (R's `dt(x, df, ncp)`). Uses the identity
 // `f = df/|x| * |F(x*sqrt((df+2)/df), df+2, ncp) - F(x, df, ncp)|` for
 // `|x| > eps*sqrt(df)`, and the closed form at `x ~= 0`. `ncp = 0` falls back

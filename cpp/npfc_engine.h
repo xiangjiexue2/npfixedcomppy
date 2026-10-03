@@ -35,6 +35,19 @@ namespace npfc {
 inline bool f64_isnan(double x) { return std::isnan(x); }
 inline double f64_nan() { return std::numeric_limits<double>::quiet_NaN(); }
 
+// ---------------------------------------------------------------------------
+// Per-solve gradient scratch. The `dens` vector of a solvegrad call is fixed
+// for the WHOLE support-point search (it changes only once the outer loop
+// recomputes the mapping), so the per-family invariant arrays that every
+// gradfun/gradfunvec call recomputed from scratch (e.g. the reciprocal
+// `1 / (dens + pre)` and its dot product) are computed ONCE per solve by
+// `prepare_solve` (defined per-family in npfc_families.h) and reused by every
+// candidate evaluation inside the search.
+// ---------------------------------------------------------------------------
+struct SolveCtx {
+    const std::vector<double>* dens = nullptr;
+};
+
 // Stable-sort comparator matching Rust's `a.partial_cmp(b).unwrap_or(Equal)`:
 // NaNs compare "equal" (never less), so a plain `a < b` is equivalent.
 inline bool f64_less(double a, double b) { return a < b; }
@@ -69,14 +82,25 @@ public:
     // Gradient of the loss w.r.t. a single new support point `mu`. Fills
     // (a0, a1): the derivative in the probability direction (a0) and in the
     // support-point direction (a1); unrequested components are left 0.0.
-    virtual void gradfun(double mu, const std::vector<double>& dens, bool d0,
-                         bool d1, double& a0, double& a1) const = 0;
+    // `ctx` carries the per-solve invariant cache built by `prepare_solve`
+    // (see `SolveCtx`); a ctx whose `dens` does not match the family's
+    // cache makes the family recompute on the fly (identical arithmetic).
+    virtual void gradfun(double mu, const std::vector<double>& dens,
+                         SolveCtx& ctx, bool d0, bool d1, double& a0,
+                         double& a1) const = 0;
 
     // Vectorised gradient over support points `mu`.
     virtual void gradfunvec(const std::vector<double>& mu,
-                            const std::vector<double>& dens, bool d0, bool d1,
-                            std::vector<double>& a0,
+                            const std::vector<double>& dens, SolveCtx& ctx,
+                            bool d0, bool d1, std::vector<double>& a0,
                             std::vector<double>& a1) const = 0;
+
+    // Per-solve invariant preparation, called ONCE at the start of each
+    // `solvegrad` with the `dens` that the whole support-point search uses.
+    // A family caches the arrays every gradfun/gradfunvec call inside the
+    // search would otherwise recompute (e.g. `1 / (dens + precompute)`).
+    // Default: nothing to prepare.
+    virtual void prepare_solve(const std::vector<double>& /*dens*/) {}
 
     // Recompute the weights `pi0` given support points `mu0` and the current
     // mixture density `dens` (constrained NNLS weight subproblem followed by
@@ -285,6 +309,12 @@ public:
           iter_(0),
           convergence_(0),
           verbose_(verbose) {
+        // A/B knob (default -1 = unlimited, i.e. the shipped behaviour): cap
+        // the refinement steps each candidate runs inside `brmin`/`dfmin` —
+        // "fewer steps per candidate" experiments (less per step, the outer
+        // loop then needs more iterations to converge).
+        if (const char* e = std::getenv("NPFIC_REFINE_STEPS"))
+            refine_steps_ = std::atol(e);
         // sort gridpoints (R does sort(gridpoints) before calling the C++ fn)
         std::sort(gridpoints_.begin(), gridpoints_.end(), f64_less);
         set_precompute();
@@ -298,21 +328,25 @@ public:
     // `Brmin`: improved Brent's method for the gradient's d1 (derivative
     // available), called on a sign-change interval. Port of `Brmin`.
     double brmin(double lb, double ub, const std::vector<double>& dens,
-                 double tol) const {
+                 SolveCtx& ctx, double tol) const {
         double _duma, fa;
-        fam_->gradfun(lb, dens, false, true, _duma, fa);
+        ++grad_evals_;
+        fam_->gradfun(lb, dens, ctx, false, true, _duma, fa);
         double _dumb, fb;
-        fam_->gradfun(ub, dens, false, true, _dumb, fb);
+        ++grad_evals_;
+        fam_->gradfun(ub, dens, ctx, false, true, _dumb, fb);
         double a = lb, b = ub;
         double s = a, fs = fa;
         double c = a, fc = fa;
         long guard = 0;
         while (std::abs(fc) > tol && std::abs(fs) > tol &&
-               std::abs(b - a) > tol && guard < 1000) {
+               std::abs(b - a) > tol && guard < 1000 &&
+               (refine_steps_ < 0 || guard < refine_steps_)) {
             guard++;
             c = (a + b) / 2.0;
             double _dumc, fcc;
-            fam_->gradfun(c, dens, false, true, _dumc, fcc);
+            ++grad_evals_;
+            fam_->gradfun(c, dens, ctx, false, true, _dumc, fcc);
             fc = fcc;
             if (fa != fc && fb != fc) {
                 s = a * fb * fc / (fa - fb) / (fa - fc) +
@@ -323,7 +357,8 @@ public:
             }
             if (s > a && s < b) {
                 double _dums, fss;
-                fam_->gradfun(s, dens, false, true, _dums, fss);
+                ++grad_evals_;
+                fam_->gradfun(s, dens, ctx, false, true, _dums, fss);
                 fs = fss;
             } else {
                 s = c;
@@ -355,7 +390,7 @@ public:
     // `Dfmin`: derivative-free minimum via successive parabolic
     // interpolation. Port of `Dfmin`.
     double dfmin(const std::array<double, 3>& x1, const std::array<double, 3>& fx1,
-                 const std::vector<double>& dens, double tol) const {
+                 const std::vector<double>& dens, SolveCtx& ctx, double tol) const {
         // C++: `lb`/`ub` are taken from the ORIGINAL endpoints before the
         // reordering swaps; using the post-swap xx[0]/xx[2] narrows the
         // interval and changes the midpoint fallbacks (trajectory drift).
@@ -372,7 +407,8 @@ public:
             std::swap(fxx[1], fxx[2]);
         }
         long guard = 0;
-        while (ub - lb > tol && guard < 1000) {
+        while (ub - lb > tol && guard < 1000 &&
+               (refine_steps_ < 0 || guard < refine_steps_)) {
             guard++;
             double newpoint = newmin(xx, fxx);
             if (f64_isnan(newpoint) || newpoint < lb || newpoint > ub) {
@@ -382,7 +418,8 @@ public:
                     newpoint = (xx[0] + xx[2]) / 2.0;
             }
             double fnewpoint, _dum;
-            fam_->gradfun(newpoint, dens, true, false, fnewpoint, _dum);
+            ++grad_evals_;
+            fam_->gradfun(newpoint, dens, ctx, true, false, fnewpoint, _dum);
             if (fnewpoint > fxx[2]) {
                 if (newpoint > xx[2]) {
                     ub = newpoint;
@@ -434,8 +471,14 @@ public:
         const int l = static_cast<int>(gp.size());
         if (l < 2)
             return {};
+        // Per-solve invariant cache (built once, reused by every candidate
+        // evaluation below — the family recomputes the identical arithmetic).
+        const_cast<Family*>(fam_.get())->prepare_solve(dens);
+        SolveCtx ctx;
+        ctx.dens = &dens;
         std::vector<double> pv, pg;
-        fam_->gradfunvec(gp, dens, false, true, pv, pg);
+        grad_evals_ += static_cast<long>(gp.size());
+        fam_->gradfunvec(gp, dens, ctx, false, true, pv, pg);
         std::vector<int> idx;
         for (int i = 0; i < l - 1; ++i)
             if (pg[i] < 0.0 && pg[i + 1] > 0.0)
@@ -443,10 +486,11 @@ public:
         std::vector<double> ans;
         ans.reserve(idx.size());
         for (int i : idx)
-            ans.push_back(brmin(gp[i], gp[i + 1], dens, tol));
+            ans.push_back(brmin(gp[i], gp[i + 1], dens, ctx, tol));
         if (!ans.empty()) {
             std::vector<double> vals, g2;
-            fam_->gradfunvec(ans, dens, true, false, vals, g2);
+            grad_evals_ += static_cast<long>(ans.size());
+            fam_->gradfunvec(ans, dens, ctx, true, false, vals, g2);
             std::vector<double> filt;
             filt.reserve(ans.size());
             for (std::size_t i = 0; i < ans.size(); ++i)
@@ -455,11 +499,13 @@ public:
             ans = std::move(filt);
         }
         double pv2, _s2;
-        fam_->gradfun(gp[0], dens, true, false, pv2, _s2);
+        ++grad_evals_;
+        fam_->gradfun(gp[0], dens, ctx, true, false, pv2, _s2);
         if (pv2 < 0.0 && pg[0] > 0.0)
             ans.push_back(gp[0]);
         const int last = l - 1;
-        fam_->gradfun(gp[last], dens, true, false, pv2, _s2);
+        ++grad_evals_;
+        fam_->gradfun(gp[last], dens, ctx, true, false, pv2, _s2);
         if (pv2 < 0.0 && pg[last] < 0.0)
             ans.push_back(gp[last]);
         return ans;
@@ -473,13 +519,18 @@ public:
         const int l = static_cast<int>(gp.size());
         if (l < 3)
             return {};
+        const_cast<Family*>(fam_.get())->prepare_solve(dens);
+        SolveCtx ctx;
+        ctx.dens = &dens;
         std::vector<double> pv, _g;
-        fam_->gradfunvec(gp, dens, true, false, pv, _g);
+        grad_evals_ += static_cast<long>(gp.size());
+        fam_->gradfunvec(gp, dens, ctx, true, false, pv, _g);
         std::vector<double> ans;
         for (int j = 0; j < l - 2; ++j) {
             if ((pv[j + 1] - pv[j]) < 0.0 && (pv[j + 2] - pv[j + 1]) > 0.0) {
                 const double r = dfmin({gp[j], gp[j + 1], gp[j + 2]},
-                                       {pv[j], pv[j + 1], pv[j + 2]}, dens, tol);
+                                       {pv[j], pv[j + 1], pv[j + 2]}, dens, ctx,
+                                       tol);
                 if (!f64_isnan(r))
                     ans.push_back(r);
             }
@@ -577,7 +628,9 @@ public:
             }
             if (verbose_ >= 2) {
                 std::vector<double> gv, gg;
-                fam_->gradfunvec(newpoints, dens, true, true, gv, gg);
+                SolveCtx vctx;
+                vctx.dens = &dens;
+                fam_->gradfunvec(newpoints, dens, vctx, true, true, gv, gg);
                 std::fprintf(stderr, "new points: ");
                 for (size_t i = 0; i < newpoints.size(); ++i)
                     std::fprintf(stderr, "%g%s", newpoints[i],
@@ -665,9 +718,10 @@ public:
             std::fprintf(stderr,
                          "PROFILE iters=%ld total=%.1fms  solvegrad=%.1f  "
                          "mapping=%.1f  loss=%.1f  weights=%.1f  collapse=%.1f "
-                         "(ms)\n",
+                         "evals=%ld (ms)\n",
                          iter_, tot * 1e3, pt_grad * 1e3, pt_map * 1e3,
-                         pt_loss * 1e3, pt_wt * 1e3, pt_col * 1e3);
+                         pt_loss * 1e3, pt_wt * 1e3, pt_col * 1e3,
+                         grad_evals_);
         }
         resultpt_ = std::move(mu0);
         resultpr_ = std::move(pi0);
@@ -888,7 +942,9 @@ public:
         sortmix(mu0new, pi0new);
         const std::vector<double> dens = fam_->mapping(resultpt_, resultpr_);
         std::vector<double> maxgrad, _g2;
-        fam_->gradfunvec(resultpt_, dens, true, false, maxgrad, _g2);
+        SolveCtx fctx;
+        fctx.dens = &dens;
+        fam_->gradfunvec(resultpt_, dens, fctx, true, false, maxgrad, _g2);
         double min_gradient = std::numeric_limits<double>::infinity();
         for (double v : maxgrad)
             min_gradient = std::min(min_gradient, v);
@@ -916,6 +972,11 @@ private:
     int convergence_;
     std::vector<double> resultpt_, resultpr_;
     int verbose_;
+    long refine_steps_ = -1;  // -1 = unlimited (the shipped behaviour)
+    // Count of (mu, dens) gradient evaluations inside the loop (scalar
+    // gradfun = 1 each, vectorised gradfunvec = one per point); the A/B
+    // "less work per step" knob is read against this (PROFILE line only).
+    mutable long grad_evals_ = 0;
 };
 
 }  // namespace npfc

@@ -43,7 +43,7 @@ default the identity). It runs its own L-BFGS-B support-point search (the
 L-BFGS-B of yixuan/LBFGSpp, as in the R package) instead of the 1-D
 engine; the R package documents it as *experimental and possibly very
 slow*. On this build it is still the slowest family relative to R
-(n=300: ≈ 2.7 s vs ≈ 0.8 s, same data — the residual gap is the per-cell
+(n=300: ≈ 2.6 s vs ≈ 0.8 s, same data — the residual gap is the per-cell
 L-BFGS-B search machinery, after a hand-unrolled 2×2 density kernel *and*
 a 0-division explicit-inverse objective fast path cut the old ~28× gap to
 ~3.5×) — see [`docs/PERF.md`](docs/PERF.md). The per-cell objective has
@@ -109,7 +109,7 @@ enforce this. Details and measured evidence:
 `beta` 为 `2 x 2` 协方差矩阵，默认单位阵）。它走自带的 L-BFGS-B 支撑点
 搜索（与 R 包相同，即 yixuan/LBFGSpp 的 L-BFGS-B），不复用一维引擎；
 R 包将其标注为*实验性、可能很慢*。本构建下它仍是相对 R 最慢的族
-（n=300：≈ 2.7 s vs ≈ 0.8 s，同一数据——在引入手写展开的 2×2 密度内核
+（n=300：≈ 2.6 s vs ≈ 0.8 s，同一数据——在引入手写展开的 2×2 密度内核
 与 0 除法显式逆目标函数快路径后，旧 ~28× 差距已收窄到 ~3.5×，残余差距
 在逐格 L-BFGS-B 求解器机制），见
 [`docs/PERF.md`](docs/PERF.md)。逐格目标函数有两条路径：快路径（默认，
@@ -228,6 +228,53 @@ re-derived for n = 2:
   `d0`-only branch exists solely for R's `npnorm2Dll` gradient
   convention — a cosmetic change with no measurable benefit.
 
+**1-D performance: grid-fill memoization + per-solve invariant caching**
+(the numbers in §6/§4 of this README are re-measured on the current
+build; `tests/reprofile_phases.py` re-runs the `docs/PERF.md` §1 phase
+table):
+
+* **Binned normal families — grid-fill memoization.** The binned
+  trapezoid/cdf fills are now memoized on the exact `mu` vector
+  (`detail::KernelMemo`): the per-iteration grid sweep (the dominant
+  binned cost) and the small support-set fills are served from the
+  precomputed grid fill instead of being refilled at every candidate
+  point, and a served matrix is bit-identical to a fresh fill. This is
+  what takes `npnormllw`, n=5000 from ≈ 131 ms to ≈ 37 ms wall (now
+  ~3× **faster** than R's ≈ 120 ms) and `estpi0(npnormllw)` from
+  ≈ 563 ms to ≈ 84 ms. `npnormadw` improves less — its `collapse`
+  re-weighting churns the support sets — and still trails R; see the
+  corrected note in [`docs/PERF.md`](docs/PERF.md) §3.
+* **All 1-D families — per-solve invariant caching.** The `dens` vector
+  is fixed for the whole support-point search of each `solvegrad`, so
+  the per-family invariant arrays every `gradfun`/`gradfunvec` call
+  used to recompute (`1/(dens+precompute)` and its dot product, the AD
+  `s1` / `Σ w2/(1-fl)` terms, the CVM difference array, the
+  count-weighted LL variants) are now built ONCE per `solvegrad` by a
+  per-family `prepare_solve` and reused by every candidate evaluation
+  — same loop, same accumulation order, so a hit is bit-identical; a
+  `dens` mismatch rebuilds on the spot (only the end-of-fit `finish()`
+  path). Measured solvegrad deltas: `nptll` β=5, n=5000 2200 →
+  2102 ms; `npnormcll`, n=1000 459 → 467 ms (unchanged within noise —
+  its cost is the NNLS, not the sweep); the small cases are within ~5 %.
+* **`dnt` constants hoisted.** The non-central-t pdf's `df`-level
+  constants (`log df`, `√((df+2)/df)`, the `gammln` pair) are computed
+  once per run into `stats::DntConst`; the cached `dnt_c` substitutes
+  them and is bit-identical to `dnt`.
+* **`NPFIC_REFINE_STEPS` — experimental A/B knob, default unchanged.**
+  Caps the refinement steps each candidate runs inside `brmin`/`dfmin`
+  ("less work per step, the outer loop then needs more iterations").
+  Measured A/B at n=30000, identical data/init/grid/tol
+  (`tests/refine_ab.py`, `tests/refine_ab_evals.py`): no arm beats the
+  shipped behaviour uniformly — the 2-iteration-converging `nptll` case
+  gains only ~1–7 % wall at bit-identical ll, while `npnormll` at
+  cap=2 needs 60 iterations (599 ms vs 271 ms shipped) and cap=1
+  drifts off the trajectory. The default stays `-1` (unlimited, the
+  shipped behaviour); the knob is kept for further experiments. The
+  `NPFIXEDCOMPY_PROFILE` line now also reports the `solvegrad`
+  evaluation count (`evals=`).
+
+All ten parity suites report `TOTAL BAD: 0` on the current build.
+
 ### 0.2.1 更新内容（相对 0.2.0）
 
 **新增：二维族 `npnorm2Dll`** —— 双变量正态混合分布，经
@@ -304,6 +351,43 @@ L-BFGS-B 目标函数为 n = 2 重新推导：
 * **unify(d0/d1)** 维持**否决**：一维各族永远取全量梯度对，
   `d0`-only 分支只为 R `npnorm2Dll` 的梯度约定（d0 = 概率方向，
   d1 = 支撑点方向）而存在，合并纯属表面改动、无可测收益。
+
+**一维性能：网格填充 memo + 每次求解的不变量缓存**（本 README §6/§4
+的数字已在当前构建上重新实测；`tests/reprofile_phases.py` 可重跑
+`docs/PERF.md` §1 的 phase 表）：
+
+* **分箱正态族——网格填充 memo。** 分箱梯形/分布函数填充现按 `mu`
+  向量精确键控做 memo（`detail::KernelMemo`）：每轮网格扫描（分箱族的
+  主要开销）与小编撑集填充直接服用预备算好的网格填充，不再在每个候选
+  点重填，服用的矩阵与新算逐位一致。`npnormllw`，n=5000 的 wall 从
+  ≈ 131 ms 降到 ≈ 37 ms（现在**快于** R 的 ≈ 120 ms 约 3 倍），
+  `estpi0(npnormllw)` 从 ≈ 563 ms 降到 ≈ 84 ms；`npnormadw` 改善较小
+  （其 `collapse` 重加权使支撑集不断变化），仍落后于 R——修正后的
+  说明见 [`docs/PERF.md`](docs/PERF.md) §3。
+* **所有一维族——每次求解的不变量缓存。** `solvegrad` 的整个支撑点
+  搜索期间 `dens` 固定，于是各族每次 `gradfun`/`gradfunvec` 调用原来
+  都要重算的不变量数组（`1/(dens+precompute)` 及其点积、AD 的 `s1` /
+  `Σ w2/(1-fl)` 项、CVM 的差值数组、带计数的 LL 变体）现在由各族的
+  `prepare_solve` 在每次 `solvegrad` 只建一次，被每个候选点评估复用
+  ——循环与累加顺序不变，命中即逐位一致；`dens` 不匹配时现场重算
+  （只有拟合末尾的 `finish()` 路径）。实测 solvegrad 变化：
+  `nptll` β=5，n=5000 为 2200 → 2102 ms；`npnormcll`，n=1000 为
+  459 → 467 ms（噪声内不变——其开销在 NNLS 而非扫描）；小用例在
+  ~5 % 以内。
+* **`dnt` 常量上提。** 非中心 t 密度函数的 `df` 级常量（`log df`、
+  `√((df+2)/df)`、`gammln` 差）每轮运行只算一次存入
+  `stats::DntConst`；带缓存的 `dnt_c` 代入它们，与 `dnt` 逐位一致。
+* **`NPFIC_REFINE_STEPS`——实验性 A/B 旋钮，默认不变。** 限制每个候选
+  点在 `brmin`/`dfmin` 内走的精修步数（“每步少干点活，外层多迭代几
+  轮”）。n=30000 上同数据/初值/网格/tol 的 A/B 实测
+  （`tests/refine_ab.py`、`tests/refine_ab_evals.py`）：没有任何臂统一
+  优于 shipped 行为——2 轮即收敛的 `nptll` 只省 ~1–7 % wall 且 ll
+  逐位相同，而 `npnormll` 在 cap=2 需要 60 轮（599 ms vs shipped
+  271 ms）、cap=1 轨迹漂移。默认保持 `-1`（不限制，即 shipped 行为）；
+  旋钮保留供后续实验。`NPFIXEDCOMPY_PROFILE` 行现在还会打印
+  `solvegrad` 的求值次数（`evals=`）。
+
+当前构建上全部 10 个 parity 套件报告 `TOTAL BAD: 0`。
 
 ### What's new in 0.2.0 (vs 0.1.0)
 
@@ -821,24 +905,24 @@ this build (median of 5, warmup excluded):
 
 | case | `npfixedcomppy` | R `npfixedcomp2` |
 |------|-----------------|------------------|
-| `computemixdist(x, method="npnormll")`, n=1000 | ≈ 12 ms | ≈ 19 ms |
-| `computemixdist(x, method="nptll", beta=inf)`, n=1000 | ≈ 37 ms | ≈ 211 ms |
-| `computemixdist(x, method="nptll", beta=5)`, n=5000 | ≈ 3.1 s | ≈ 50 s |
+| `computemixdist(x, method="npnormll")`, n=1000 | ≈ 11 ms | ≈ 19 ms |
+| `computemixdist(x, method="nptll", beta=inf)`, n=1000 | ≈ 36 ms | ≈ 211 ms |
+| `computemixdist(x, method="nptll", beta=5)`, n=5000 | ≈ 3.0 s | ≈ 50 s |
 | `computemixdist(x, method="npnormcll", beta=1000)`, n=1000 | ≈ 1.0 s | ≈ 1.9 s |
-| `computemixdist(x, method="npnormad")`, n=1000 | ≈ 38 ms | ≈ 59 ms |
+| `computemixdist(x, method="npnormad")`, n=1000 | ≈ 36 ms | ≈ 59 ms |
 | `computemixdist(x, method="nppoisll")`, n=1000 | ≈ 0.6 ms | ≈ 5 ms |
-| `estpi0(x, method="npnormll")`, n=1000 | ≈ 29 ms | ≈ 97 ms |
-| `computemixdist(X, method="npnorm2Dll")`, n=300 (2-D) | ≈ 2.7 s | ≈ 0.8 s |
+| `estpi0(x, method="npnormll")`, n=1000 | ≈ 25 ms | ≈ 97 ms |
+| `computemixdist(X, method="npnorm2Dll")`, n=300 (2-D) | ≈ 2.6 s | ≈ 0.8 s |
 
 Binned (`order = -3`, i.e. `h = 10^-3`):
 
 | case | `npfixedcomppy` | R `npfixedcomp2` |
 |------|-----------------|------------------|
-| `computemixdist(x, method="npnormllw")`, n=5000 | ≈ 131 ms | ≈ 120 ms |
-| `computemixdist(x, method="npnormadw")`, n=5000 | ≈ 421 ms * | ≈ 170 ms * |
-| `computemixdist(x, method="nptllw")`, n=5000 | ≈ 222 ms | ≈ 1.97 s |
-| `computemixdist(x, method="nptllw", beta=5)`, n=5000 | ≈ 2.1 s | ≈ 29.3 s |
-| `estpi0(x, method="npnormllw")`, n=5000 | ≈ 563 ms | ≈ 1.33 s |
+| `computemixdist(x, method="npnormllw")`, n=5000 | ≈ 37 ms | ≈ 120 ms |
+| `computemixdist(x, method="npnormadw")`, n=5000 | ≈ 387 ms * | ≈ 170 ms * |
+| `computemixdist(x, method="nptllw")`, n=5000 | ≈ 206 ms | ≈ 1.97 s |
+| `computemixdist(x, method="nptllw", beta=5)`, n=5000 | ≈ 2.0 s | ≈ 29.3 s |
+| `estpi0(x, method="npnormllw")`, n=5000 | ≈ 84 ms | ≈ 1.33 s |
 
 \* `npnormadw` fits wander between basins run-to-run in both
 implementations, so this ratio is indicative.
@@ -848,17 +932,18 @@ experimental family whose per-outer-iteration support-point search
 launches one L-BFGS-B problem **per grid cell** (103 × 103 for the
 default grid) and, unlike the 1-D engine, it does not use the kernel
 column cache. Two fast paths now cut the old ~28× gap to ~3.5×:
-(i) a hand-unrolled 2×2 density-kernel fast path (cutting `dnpnormND`
-from ≈ 0.4 ms/call to ≈ 7.4 µs/call at n=300 — the old gap's main
-source, since MSVC keeps the per-point heap temporaries that the R
-build's GCC eliminates), and (ii) an objective fast path with an
-explicit-inverse quadratic form (0 divisions/point), per-`solvegrad`
-invariant caching, and preallocated buffers — the default, which cuts
-the per-evaluation cost ≈ 10.1 → ≈ 6.3 µs on the reference run (same
-421,810 evaluations, same accepted cell set; on the second n=300
-benchmark the ~1e-13 difference from the R-identical kernel also
-changes the accepted cells, dropping the evaluation count 769,533 →
-251,704). The density kernels remain bit-exact with R, and both paths
+(i) a hand-unrolled 2×2 density-kernel fast path (cutting the original
+`dec.solve(d)` port from ≈ 44 µs/call to ≈ 6.5 µs/call at n=300 for
+`dnormNDarray`, ≈ 7.4 µs for `dnpnormND` — the old gap's main source,
+since MSVC keeps the per-point heap temporaries that the R build's GCC
+eliminates), and (ii) an objective fast path with an explicit-inverse
+quadratic form (0 divisions/point), per-`solvegrad` invariant caching,
+and preallocated buffers — the default, which cuts the per-evaluation
+cost ≈ 10.1 → ≈ 6.3 µs on the reference run (same 421,810 evaluations,
+same accepted cell set; on the second n=300 benchmark the ~1e-13
+difference from the R-identical kernel also changes the accepted cells,
+dropping the evaluation count 769,533 → 251,704). The density kernels
+remain bit-exact with R, and both paths
 land on a similar valid optimum
 (main components within ≈ 0.06, ll within ≈ 0.01); `NPFIC_2D_EXACT=1`
 selects the bit-exact R-identical path. See
@@ -867,18 +952,25 @@ selects the bit-exact R-identical path. See
 For the `t` family with small degrees of freedom the cost grows with `n`
 (super-linearly — the per-point `dnt` kernel has no cheap identity), so
 very large `n` is slow; the normal families scale linearly. The binned
-normal families run within ~25 % of R's binned time (bit-exact
-column-major fill, scalar `exp` on both sides), while the binned `t`
-family — whose kernel is a cheap CDF difference — is ~8–14× faster. See
+`npnormllw` family runs ~3× faster than R's binned normal (the grid
+sweep reads the precomputed grid fill instead of refilling the
+trapezoid at every candidate point; see the note in
+[`docs/PERF.md`](docs/PERF.md) §3), while `npnormadw` still trails R
+(its `collapse` re-weighting keeps the support sets churning, so the
+fill memoization helps less); the binned `t` family — whose kernel is a
+cheap CDF difference — is ~8–14× faster. See
 [`docs/PERF.md`](docs/PERF.md) for the phase profiles, the kernel column
 cache, and the full comparison with R.
 
 Environment knobs: `NPFIXEDCOMPY_PROFILE=1` prints a per-phase timing
-line (solvegrad / mapping / loss / weights / collapse) to stderr;
-`NPFIC_2D_EXACT=1` selects the bit-exact R-identical `npnorm2Dll`
-objective path (default: the fast path, §4a.2 of
-[`docs/PERF.md`](docs/PERF.md)); `OMP_NUM_THREADS` sizes Eigen's pool
-(when the build has OpenMP) without changing the results.
+line (solvegrad / mapping / loss / weights / collapse, plus the
+`solvegrad` evaluation count) to stderr; `NPFIC_2D_EXACT=1` selects the
+bit-exact R-identical `npnorm2Dll` objective path (default: the fast
+path, §4a.2 of [`docs/PERF.md`](docs/PERF.md)); `NPFIC_REFINE_STEPS`
+caps the per-candidate refinement steps inside `brmin`/`dfmin`
+(experimental, default `-1` = unlimited = shipped behaviour, see
+What's new); `OMP_NUM_THREADS` sizes Eigen's pool (when the build has
+OpenMP) without changing the results.
 
 ### 性能
 
@@ -890,32 +982,33 @@ OpenMP 探测通过时启用 Eigen 自身的并行 GEMM/GEMV）；内核列缓�
 
 | 用例 | `npfixedcomppy` | R `npfixedcomp2` |
 |------|-----------------|------------------|
-| `computemixdist(x, method="npnormll")`，n=1000 | ≈ 12 ms | ≈ 19 ms |
-| `computemixdist(x, method="nptll", beta=inf)`，n=1000 | ≈ 37 ms | ≈ 211 ms |
-| `computemixdist(x, method="nptll", beta=5)`，n=5000 | ≈ 3.1 s | ≈ 50 s |
+| `computemixdist(x, method="npnormll")`，n=1000 | ≈ 11 ms | ≈ 19 ms |
+| `computemixdist(x, method="nptll", beta=inf)`，n=1000 | ≈ 36 ms | ≈ 211 ms |
+| `computemixdist(x, method="nptll", beta=5)`，n=5000 | ≈ 3.0 s | ≈ 50 s |
 | `computemixdist(x, method="npnormcll", beta=1000)`，n=1000 | ≈ 1.0 s | ≈ 1.9 s |
-| `computemixdist(x, method="npnormad")`，n=1000 | ≈ 38 ms | ≈ 59 ms |
+| `computemixdist(x, method="npnormad")`，n=1000 | ≈ 36 ms | ≈ 59 ms |
 | `computemixdist(x, method="nppoisll")`，n=1000 | ≈ 0.6 ms | ≈ 5 ms |
-| `estpi0(x, method="npnormll")`，n=1000 | ≈ 29 ms | ≈ 97 ms |
-| `computemixdist(X, method="npnorm2Dll")`，n=300（二维） | ≈ 2.7 s | ≈ 0.8 s |
+| `estpi0(x, method="npnormll")`，n=1000 | ≈ 25 ms | ≈ 97 ms |
+| `computemixdist(X, method="npnorm2Dll")`，n=300（二维） | ≈ 2.6 s | ≈ 0.8 s |
 
 分箱（`order = -3`，即 `h = 10^-3`）：
 
 | 用例 | `npfixedcomppy` | R `npfixedcomp2` |
 |------|-----------------|------------------|
-| `computemixdist(x, method="npnormllw")`，n=5000 | ≈ 131 ms | ≈ 120 ms |
-| `computemixdist(x, method="npnormadw")`，n=5000 | ≈ 421 ms * | ≈ 170 ms * |
-| `computemixdist(x, method="nptllw")`，n=5000 | ≈ 222 ms | ≈ 1.97 s |
-| `computemixdist(x, method="nptllw", beta=5)`，n=5000 | ≈ 2.1 s | ≈ 29.3 s |
-| `estpi0(x, method="npnormllw")`，n=5000 | ≈ 563 ms | ≈ 1.33 s |
+| `computemixdist(x, method="npnormllw")`，n=5000 | ≈ 37 ms | ≈ 120 ms |
+| `computemixdist(x, method="npnormadw")`，n=5000 | ≈ 387 ms * | ≈ 170 ms * |
+| `computemixdist(x, method="nptllw")`，n=5000 | ≈ 206 ms | ≈ 1.97 s |
+| `computemixdist(x, method="nptllw", beta=5)`，n=5000 | ≈ 2.0 s | ≈ 29.3 s |
+| `estpi0(x, method="npnormllw")`，n=5000 | ≈ 84 ms | ≈ 1.33 s |
 
 \* `npnormadw` 在两侧实现中都存在逐次运行的 basin 漂移，该比值仅作参考。
 
 上表 2-D 一行是**有记录的例外**：`npnorm2Dll` 是实验性族，其每轮外层
 迭代的支撑点搜索对**每个网格单元**各启动一个 L-BFGS-B 问题（默认网格
 103 × 103），且与一维引擎不同，它不使用内核列缓存。两条快路径把旧
-~28× 差距收窄到 ~3.5×：(i) 手写展开的 2×2 密度内核快路径（
-`dnpnormND` 从 ≈ 0.4 ms/次降到 ≈ 7.4 µs/次，n=300——旧差距的主要来源：
+~28× 差距收窄到 ~3.5×：(i) 手写展开的 2×2 密度内核快路径（把最初逐行
+照搬的 `dec.solve(d)` 从 ≈ 44 µs/次降到 ≈ 6.5 µs/次，n=300 的
+`dnormNDarray`；`dnpnormND` ≈ 7.4 µs/次——旧差距的主要来源：
 MSVC 保留了逐点堆临时对象，而 R 构建的 GCC 会消除它们）；(ii) 目标函数
 快路径（默认）——显式逆矩阵二次型（每点 0 次除法）、每次 `solvegrad`
 的不变量缓存、预分配缓冲——参考运行上把单次求值从 ≈ 10.1 µs 降到
@@ -927,13 +1020,17 @@ MSVC 保留了逐点堆临时对象，而 R 构建的 GCC 会消除它们）；(
 [`docs/PERF.md`](docs/PERF.md)。
 
 t 族在小自由度下 `dnt` 核没有廉价恒等式，成本随 `n` 超线性增长，`n` 很
-大时较慢；正态族为线性。分箱正态族与 R 的分箱耗时相差约 25% 以内（列
-主序、逐位精确的填充，两侧同为标量 `exp`）；分箱 t 族的核是廉价的 CDF
-差值，快约 8–14 倍。分阶段 profile、内核列缓存及与 R 的完整对比见
-[`docs/PERF.md`](docs/PERF.md)。
+大时较慢；正态族为线性。分箱 `npnormllw` 族比 R 的分箱正态快约 3 倍
+（网格扫描直接读取预备算好的网格填充，而不是在每个候选点重填梯形；见
+[`docs/PERF.md`](docs/PERF.md) §3 的说明），`npnormadw` 仍落后于 R
+（其 `collapse` 重加权使支撑集不断变化，填充 memo 帮助较小）；分箱
+t 族的核是廉价的 CDF 差值，快约 8–14 倍。分阶段 profile、内核列缓存及
+与 R 的完整对比见 [`docs/PERF.md`](docs/PERF.md)。
 
 环境旋钮：`NPFIXEDCOMPY_PROFILE=1` 向 stderr 输出分阶段计时
-（solvegrad / mapping / loss / weights / collapse）；`NPFIC_2D_EXACT=1`
-选用 `npnorm2Dll` 的 bit-exact R 同款目标函数路径（默认：快路径，
-见 [`docs/PERF.md`](docs/PERF.md) §4a.2）；`OMP_NUM_THREADS` 调整
-Eigen 线程池大小（OpenMP 构建时），不改变结果。
+（solvegrad / mapping / loss / weights / collapse，外加 `solvegrad`
+的求值次数）；`NPFIC_2D_EXACT=1` 选用 `npnorm2Dll` 的 bit-exact R 同款
+目标函数路径（默认：快路径，见 [`docs/PERF.md`](docs/PERF.md) §4a.2）；
+`NPFIC_REFINE_STEPS` 限制 `brmin`/`dfmin` 内每个候选点的精修步数
+（实验性，默认 `-1` = 不限制 = shipped 行为，见 What's new）；
+`OMP_NUM_THREADS` 调整 Eigen 线程池大小（OpenMP 构建时），不改变结果。

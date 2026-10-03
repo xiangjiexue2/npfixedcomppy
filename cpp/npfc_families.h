@@ -322,6 +322,35 @@ public:
 
     const std::vector<double>& precompute() const override { return precompute_; }
 
+    // Build the per-solve invariants `fl`/`dens_dot_fl_` from `dens` (the
+    // engine calls this once per `solvegrad` with the outer loop's
+    // persistent `dens`; same loop and accumulation order as the former
+    // per-call evaluation, so a hit is bit-identical).
+    void prepare_solve(const std::vector<double>& dens) override {
+        fl_.clear();
+        dens_dot_fl_ = 0.0;
+        cached_fl_dens_ = nullptr;
+        if (dens.size() != len_)
+            return;
+        fl_.resize(len_);
+        double s = 0.0;
+        for (std::size_t i = 0; i < len_; ++i) {
+            const double f = 1.0 / (dens[i] + precompute_[i]);
+            fl_[i] = f;
+            s += dens[i] * f;
+        }
+        dens_dot_fl_ = s;
+        cached_fl_dens_ = &dens;
+    }
+
+    // Same arithmetic, but only when the cache is not already built for
+    // `dens` (the `finish()` / verbose paths call gradfun* without a
+    // prepare_solve; a mismatch rebuilds on the spot).
+    void ensure_fl(const std::vector<double>& dens) const {
+        if (fl_.empty() || &dens != cached_fl_dens_)
+            const_cast<NpNormLL*>(this)->prepare_solve(dens);
+    }
+
     double lossfunction(const std::vector<double>& maps) const override {
         // -sum_i log(maps[i] + pre[i]): a pure element-wise expression the
         // compiler SIMD-ises; no parallel reduction needed (the log is cheap
@@ -363,19 +392,14 @@ public:
         if (m == 0 || (!d0 && !d1))
             return;
         const Eigen::Index n = static_cast<Eigen::Index>(len_);
-        const Eigen::VectorXd densv =
-            Eigen::Map<const Eigen::VectorXd>(dens.data(), n);
         // fl[i] = 1 / (dens[i] + pre[i]); dens_dot_fl = sum_i dens[i]*fl[i].
-        // Explicit element-wise reciprocal (`.inverse()` on a non-square
-        // vector expression is not what this Eigen build computes).
-        std::vector<double> flv(len_);
-        double dens_dot_fl = 0.0;
-        for (std::size_t i = 0; i < len_; ++i) {
-            const double f = 1.0 / (dens[i] + precompute_[i]);
-            flv[i] = f;
-            dens_dot_fl += dens[i] * f;
-        }
-        const Eigen::Map<const Eigen::VectorXd> fl(flv.data(), n);
+        // Computed ONCE per `solvegrad` (the outer loop's `dens` is fixed
+        // for the whole support-point search; see `prepare_solve`) —
+        // exactly the same values and accumulation order as the former
+        // per-call evaluation, so a hit is bit-identical; a different
+        // `dens` rebuilds on the spot (only the `finish()` path).
+        ensure_fl(dens);
+        const Eigen::Map<const Eigen::VectorXd> fl(fl_.data(), n);
         // Reuse the precomputed grid kernel when the sweep points are the
         // (sorted) grid itself (the per-iteration grid sweep); otherwise
         // materialise the (n x m) kernel for these points from the
@@ -397,7 +421,7 @@ public:
         const double scale = 1.0 - sum_pi0fixed();
         if (d0) {
             const Eigen::VectorXd g0 =
-                Eigen::VectorXd::Constant(m, dens_dot_fl) - kfl * scale;
+                Eigen::VectorXd::Constant(m, dens_dot_fl_) - kfl * scale;
             a0 = detail::to_vec(g0);
         }
         if (d1) {
@@ -410,17 +434,21 @@ public:
         }
     }
 
-    void gradfun(double mu, const std::vector<double>& dens, bool d0, bool d1,
-                 double& a0, double& a1) const override {
+    void gradfun(double mu, const std::vector<double>& dens,
+                 SolveCtx& ctx, bool d0, bool d1, double& a0,
+                 double& a1) const override {
+        (void)ctx;
         std::vector<double> v0(1, 0.0), v1(1, 0.0);
         gradfunvec_impl({mu}, dens, d0, d1, v0, v1);
         a0 = v0[0];
         a1 = v1[0];
     }
 
-    void gradfunvec(const std::vector<double>& mu, const std::vector<double>& dens,
-                    bool d0, bool d1, std::vector<double>& a0,
+    void gradfunvec(const std::vector<double>& mu,
+                    const std::vector<double>& dens, SolveCtx& ctx, bool d0,
+                    bool d1, std::vector<double>& a0,
                     std::vector<double>& a1) const override {
+        (void)ctx;
         gradfunvec_impl(mu, dens, d0, d1, a0, a1);
     }
 
@@ -527,6 +555,11 @@ private:
     std::vector<double> kgrid_;
     Eigen::MatrixXd kmat_;
     kern::KernelColumnCache kc_;
+    // Per-solve invariants (see `prepare_solve`); the `dens` pointer the
+    // cache was built for (a different `dens` triggers a rebuild).
+    std::vector<double> fl_;
+    double dens_dot_fl_ = 0.0;
+    const std::vector<double>* cached_fl_dens_ = nullptr;
 };
 
 // ===========================================================================
@@ -542,11 +575,12 @@ public:
           beta_(beta),
           mu0fixed_(std::move(mu0fixed)),
           pi0fixed_(std::move(pi0fixed)),
-          precompute_(kern::dnpt(data_, mu0fixed_, pi0fixed_, beta_)) {}
+          precompute_(kern::dnpt(data_, mu0fixed_, pi0fixed_, beta_)),
+          dfc_(stats::DntConst::make(beta)) {}
 
     void prepare(const std::vector<double>& grid) override {
         kc_.init(data_, [this](double x, double mu) {
-            return stats::dnt(x, beta_, mu);
+            return stats::dnt_c(x, mu, dfc_);
         });
         if (grid.empty()) {
             kgrid_.clear();
@@ -565,7 +599,7 @@ public:
             const double mj = grid[j];
             double* col = raw.data() + j * n;
             for (std::size_t i = 0; i < n; ++i)
-                col[i] = stats::dnt(data_[i], beta_, mj);
+                col[i] = stats::dnt_c(data_[i], mj, dfc_);
             kc_.pin(mj);
             kc_.insert(mj, std::vector<double>(col, col + n));
         }
@@ -573,6 +607,31 @@ public:
     }
 
     const std::vector<double>& precompute() const override { return precompute_; }
+
+    // Build the per-solve invariants from `dens` (called once per
+    // `solvegrad` by the engine; same loop and accumulation order as the
+    // former per-call evaluation, so a hit is bit-identical).
+    void prepare_solve(const std::vector<double>& dens) override {
+        fl_.clear();
+        dens_dot_fl_ = 0.0;
+        cached_fl_dens_ = nullptr;
+        if (dens.size() != len_)
+            return;
+        fl_.resize(len_);
+        double s = 0.0;
+        for (std::size_t i = 0; i < len_; ++i) {
+            const double f = 1.0 / (dens[i] + precompute_[i]);
+            fl_[i] = f;
+            s += dens[i] * f;
+        }
+        dens_dot_fl_ = s;
+        cached_fl_dens_ = &dens;
+    }
+
+    void ensure_fl(const std::vector<double>& dens) const {
+        if (fl_.empty() || &dens != cached_fl_dens_)
+            const_cast<NpTLL*>(this)->prepare_solve(dens);
+    }
 
     double lossfunction(const std::vector<double>& maps) const override {
         double s = 0.0;
@@ -595,8 +654,10 @@ public:
 
     // Only `ansd0` is defined (the C++ class leaves `ansd1` uninitialised;
     // the `d0` solver never reads it).
-    void gradfun(double mu, const std::vector<double>& dens, bool d0, bool d1,
-                 double& a0, double& a1) const override {
+    void gradfun(double mu, const std::vector<double>& dens,
+                 SolveCtx& ctx, bool d0, bool d1, double& a0,
+                 double& a1) const override {
+        (void)ctx;
         (void)d1;
         if (!d0) {
             a0 = a1 = 0.0;
@@ -605,18 +666,19 @@ public:
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
         const std::vector<double>& col = kc_.column(mu);
+        ensure_fl(dens);
         double s = 0.0;
-        for (std::size_t i = 0; i < n; ++i) {
-            const double fl = 1.0 / (dens[i] + precompute_[i]);
-            s += dens[i] * fl - col[i] * fl * scale;
-        }
+        for (std::size_t i = 0; i < n; ++i)
+            s += dens[i] * fl_[i] - col[i] * fl_[i] * scale;
         a0 = s;
         a1 = 0.0;
     }
 
-    void gradfunvec(const std::vector<double>& mu, const std::vector<double>& dens,
-                    bool d0, bool d1, std::vector<double>& a0,
+    void gradfunvec(const std::vector<double>& mu,
+                    const std::vector<double>& dens, SolveCtx& ctx, bool d0,
+                    bool d1, std::vector<double>& a0,
                     std::vector<double>& a1) const override {
+        (void)ctx;
         (void)d1;
         const std::size_t m = mu.size();
         a0.assign(m, 0.0);
@@ -625,13 +687,9 @@ public:
             return;
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
-        std::vector<double> fullden(n);
-        double dens_dot_fullden = 0.0;
-        for (std::size_t i = 0; i < n; ++i) {
-            const double fl = 1.0 / (dens[i] + precompute_[i]);
-            fullden[i] = fl;
-            dens_dot_fullden += dens[i] * fl;
-        }
+        // Per-solve invariants (see `prepare_solve`), same loop + order as
+        // the former per-call evaluation.
+        ensure_fl(dens);
         // The full-grid sweep reads the precomputed data x grid kernel
         // columns; anything else falls back to direct dnt.
         const std::size_t g = kgrid_.size();
@@ -649,8 +707,8 @@ public:
             const double* col = colp ? colp->data() : kdata + j * n;
             double s = 0.0;
             for (std::size_t i = 0; i < n; ++i)
-                s += col[i] * fullden[i];
-            a0[j] = dens_dot_fullden - s * scale;
+                s += col[i] * fl_[i];
+            a0[j] = dens_dot_fl_ - s * scale;
         }
     }
 
@@ -734,6 +792,12 @@ private:
     std::vector<double> precompute_;
     std::vector<double> kgrid_, kmat_;
     kern::KernelColumnCache kc_;
+    // Per-solve invariants (see `prepare_solve`); the `dens` pointer the
+    // cache was built for (a different `dens` triggers a rebuild).
+    std::vector<double> fl_;
+    double dens_dot_fl_ = 0.0;
+    const std::vector<double>* cached_fl_dens_ = nullptr;
+    stats::DntConst dfc_;
 };
 
 // ===========================================================================
@@ -764,6 +828,31 @@ public:
 
     const std::vector<double>& precompute() const override { return precompute_; }
 
+    // Build the per-solve invariants from `dens` (the engine calls this
+    // once per `solvegrad`; same loop and accumulation order as the former
+    // per-call evaluation, so a hit is bit-identical).
+    void prepare_solve(const std::vector<double>& dens) override {
+        fl_.clear();
+        fd_dot_dens_ = 0.0;
+        cached_fl_dens_ = nullptr;
+        if (dens.size() != len_)
+            return;
+        fl_.resize(len_);
+        double s = 0.0;
+        for (std::size_t i = 0; i < len_; ++i) {
+            const double f = dens[i] - precompute_[i];
+            fl_[i] = f;
+            s += f * dens[i];
+        }
+        fd_dot_dens_ = s;
+        cached_fl_dens_ = &dens;
+    }
+
+    void ensure_fl(const std::vector<double>& dens) const {
+        if (fl_.empty() || &dens != cached_fl_dens_)
+            const_cast<NpNormCVM*>(this)->prepare_solve(dens);
+    }
+
     double lossfunction(const std::vector<double>& maps) const override {
         // CVM: a squared distance that is minimised (not maximised).
         return detail::par_sum1(len_, [this, &maps](std::size_t i) {
@@ -782,18 +871,21 @@ public:
         return detail::to_vec(K * detail::to_eigen(pi0));
     }
 
-    void gradfun(double mu, const std::vector<double>& dens, bool d0, bool d1,
-                 double& a0, double& a1) const override {
+    void gradfun(double mu, const std::vector<double>& dens,
+                 SolveCtx& ctx, bool d0, bool d1, double& a0,
+                 double& a1) const override {
+        (void)ctx;
         if (!d0 && !d1) {
             a0 = a1 = 0.0;
             return;
         }
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
+        ensure_fl(dens);
         const std::vector<double>& pcol = kc_.column(mu);
         double sum_new = 0.0, sum_d1 = 0.0;
         for (std::size_t i = 0; i < n; ++i) {
-            const double fl = dens[i] - precompute_[i];
+            const double fl = fl_[i];
             if (d0)
                 sum_new += (pcol[i] * scale - dens[i]) * fl;
             if (d1)
@@ -803,9 +895,11 @@ public:
         a1 = d1 ? sum_d1 * (-2.0 * scale) : 0.0;
     }
 
-    void gradfunvec(const std::vector<double>& mu, const std::vector<double>& dens,
-                    bool d0, bool d1, std::vector<double>& a0,
+    void gradfunvec(const std::vector<double>& mu,
+                    const std::vector<double>& dens, SolveCtx& ctx, bool d0,
+                    bool d1, std::vector<double>& a0,
                     std::vector<double>& a1) const override {
+        (void)ctx;
         const std::size_t m = mu.size();
         a0.assign(m, 0.0);
         a1.assign(m, 0.0);
@@ -813,13 +907,7 @@ public:
             return;
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
-        std::vector<double> fullden(n);
-        double fd_dot_dens = 0.0;
-        for (std::size_t i = 0; i < n; ++i) {
-            const double fl = dens[i] - precompute_[i];
-            fullden[i] = fl;
-            fd_dot_dens += fl * dens[i];
-        }
+        ensure_fl(dens);
         const std::size_t k0 = d0 ? 1 : 0;
         const std::size_t k1 = d1 ? 1 : 0;
         const std::size_t k = (k0 + k1) * m;
@@ -832,13 +920,13 @@ public:
                 const std::vector<double>& col = kc_.column(mu[j]);
                 double s = 0.0;
                 for (std::size_t i = 0; i < n; ++i)
-                    s += col[i] * fullden[i];
-                a0[j] = s * 2.0 * scale - fd_dot_dens * 2.0;
+                    s += col[i] * fl_[i];
+                a0[j] = s * 2.0 * scale - fd_dot_dens_ * 2.0;
             }
             if (d1) {
                 double s = 0.0;
                 for (std::size_t i = 0; i < n; ++i)
-                    s += stats::dnorm(data_[i], mu[j], beta_) * fullden[i];
+                    s += stats::dnorm(data_[i], mu[j], beta_) * fl_[i];
                 a1[j] = s * (-2.0 * scale);
             }
         }
@@ -921,6 +1009,11 @@ private:
     std::vector<double> mu0fixed_, pi0fixed_;
     std::vector<double> precompute_;
     kern::KernelColumnCache kc_;
+    // Per-solve invariants (see `prepare_solve`); the `dens` pointer the
+    // cache was built for (a different `dens` triggers a rebuild).
+    std::vector<double> fl_;
+    double fd_dot_dens_ = 0.0;
+    const std::vector<double>* cached_fl_dens_ = nullptr;
 };
 
 // ===========================================================================
@@ -946,6 +1039,31 @@ public:
     }
 
     const std::vector<double>& precompute() const override { return precompute_; }
+
+    // Build the per-solve invariants from `dens` (the engine calls this
+    // once per `solvegrad`; same loop and accumulation order as the former
+    // per-call evaluation, so a hit is bit-identical).
+    void prepare_solve(const std::vector<double>& dens) override {
+        s1_.clear();
+        sum_w2_term_ = 0.0;
+        cached_fl_dens_ = nullptr;
+        if (dens.size() != len_)
+            return;
+        s1_.resize(len_);
+        double s = 0.0;
+        for (std::size_t i = 0; i < len_; ++i) {
+            const double fl = dens[i] + precompute_[i];
+            s1_[i] = w1_[i] / fl - w2_[i] / (1.0 - fl);
+            s += w2_[i] / (1.0 - fl);
+        }
+        sum_w2_term_ = s;
+        cached_fl_dens_ = &dens;
+    }
+
+    void ensure_fl(const std::vector<double>& dens) const {
+        if (s1_.empty() || &dens != cached_fl_dens_)
+            const_cast<NpNormAD*>(this)->prepare_solve(dens);
+    }
 
     void prepare(const std::vector<double>& grid) override {
         kc_.init(data_, [this](double x, double mu) {
@@ -974,43 +1092,40 @@ public:
         return detail::to_vec(K * detail::to_eigen(pi0));
     }
 
-    void gradfun(double mu, const std::vector<double>& dens, bool d0, bool d1,
-                 double& a0, double& a1) const override {
+    void gradfun(double mu, const std::vector<double>& dens,
+                 SolveCtx& ctx, bool d0, bool d1, double& a0,
+                 double& a1) const override {
+        (void)ctx;
         if (!d0 && !d1) {
             a0 = a1 = 0.0;
             return;
         }
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
-        std::vector<double> s1(n);
-        for (std::size_t i = 0; i < n; ++i) {
-            const double fl = dens[i] + precompute_[i];
-            s1[i] = w1_[i] / fl - w2_[i] / (1.0 - fl);
-        }
+        ensure_fl(dens);
         // The CDF part from the once-per-point cache (the cheap pdf part is
         // direct); ascending-i accumulation as the reference par_sum1.
         const std::vector<double>& pcol = d0 ? kc_.column(mu) : kc_.empty();
         double s1_dot_new = 0.0;
         if (d0)
             for (std::size_t i = 0; i < n; ++i)
-                s1_dot_new += s1[i] * (pcol[i] * scale + precompute_[i]);
+                s1_dot_new += s1_[i] * (pcol[i] * scale + precompute_[i]);
         double s1_dot_d1 = 0.0;
         if (d1)
             for (std::size_t i = 0; i < n; ++i)
-                s1_dot_d1 += s1[i] * stats::dnorm(data_[i], mu, beta_) * scale;
+                s1_dot_d1 += s1_[i] * stats::dnorm(data_[i], mu, beta_) * scale;
         // C++: (s1.dot(new) + sum(w2/(1-fl))) * -1 + 2n
-        double sum_w2_term = 0.0;
-        if (d0)
-            for (std::size_t i = 0; i < n; ++i)
-                sum_w2_term += w2_[i] / (1.0 - (dens[i] + precompute_[i]));
-        a0 = d0 ? (s1_dot_new + sum_w2_term) * -1.0 + 2.0 * static_cast<double>(len_)
+        a0 = d0 ? (s1_dot_new + sum_w2_term_) * -1.0 +
+                      2.0 * static_cast<double>(len_)
                 : 0.0;
         a1 = d1 ? s1_dot_d1 : 0.0;
     }
 
-    void gradfunvec(const std::vector<double>& mu, const std::vector<double>& dens,
-                    bool d0, bool d1, std::vector<double>& a0,
+    void gradfunvec(const std::vector<double>& mu,
+                    const std::vector<double>& dens, SolveCtx& ctx, bool d0,
+                    bool d1, std::vector<double>& a0,
                     std::vector<double>& a1) const override {
+        (void)ctx;
         const std::size_t m = mu.size();
         a0.assign(m, 0.0);
         a1.assign(m, 0.0);
@@ -1018,11 +1133,8 @@ public:
             return;
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
-        const double sum_w2_term =
-            d0 ? detail::par_sum1(n, [this, &dens](std::size_t i) {
-                    return w2_[i] / (1.0 - (dens[i] + precompute_[i]));
-                })
-               : 0.0;
+        ensure_fl(dens);
+        const double sum_w2_term = d0 ? sum_w2_term_ : 0.0;
         const std::size_t k0 = d0 ? 1 : 0;
         const std::size_t k1 = d1 ? 1 : 0;
         if ((k0 + k1) * m == 0)
@@ -1033,21 +1145,15 @@ public:
             if (k0) {
                 const std::vector<double>& col = kc_.column(mu[j]);
                 double s = 0.0;
-                for (std::size_t i = 0; i < n; ++i) {
-                    const double fl = dens[i] + precompute_[i];
-                    s += (col[i] * scale + precompute_[i]) *
-                         (w1_[i] / fl - w2_[i] / (1.0 - fl));
-                }
+                for (std::size_t i = 0; i < n; ++i)
+                    s += (col[i] * scale + precompute_[i]) * s1_[i];
                 a0[j] = s * -1.0 + 2.0 * static_cast<double>(len_) -
                         sum_w2_term;
             }
             if (k1) {
                 double s = 0.0;
-                for (std::size_t i = 0; i < n; ++i) {
-                    const double fl = dens[i] + precompute_[i];
-                    s += stats::dnorm(data_[i], mu[j], beta_) *
-                         (w1_[i] / fl - w2_[i] / (1.0 - fl));
-                }
+                for (std::size_t i = 0; i < n; ++i)
+                    s += stats::dnorm(data_[i], mu[j], beta_) * s1_[i];
                 a1[j] = s * scale;
             }
         }
@@ -1165,6 +1271,11 @@ private:
     std::vector<double> precompute_;
     std::vector<double> w1_, w2_;
     kern::KernelColumnCache kc_;
+    // Per-solve invariants (see `prepare_solve`); the `dens` pointer the
+    // cache was built for (a different `dens` triggers a rebuild).
+    std::vector<double> s1_;
+    double sum_w2_term_ = 0.0;
+    const std::vector<double>* cached_fl_dens_ = nullptr;
 };
 
 // ===========================================================================
@@ -1197,6 +1308,31 @@ public:
 
     const std::vector<double>& precompute() const override { return precompute_; }
 
+    // Build the per-solve invariants from `dens` (the engine calls this
+    // once per `solvegrad`; same loop and accumulation order as the former
+    // per-call evaluation, so a hit is bit-identical).
+    void prepare_solve(const std::vector<double>& dens) override {
+        fl_.clear();
+        dens_dot_fl_ = 0.0;
+        cached_fl_dens_ = nullptr;
+        if (dens.size() != len_)
+            return;
+        fl_.resize(len_);
+        double s = 0.0;
+        for (std::size_t i = 0; i < len_; ++i) {
+            const double f = 1.0 / (dens[i] + precompute_[i]);
+            fl_[i] = f;
+            s += dens[i] * f;
+        }
+        dens_dot_fl_ = s;
+        cached_fl_dens_ = &dens;
+    }
+
+    void ensure_fl(const std::vector<double>& dens) const {
+        if (fl_.empty() || &dens != cached_fl_dens_)
+            const_cast<NpNormCLL*>(this)->prepare_solve(dens);
+    }
+
     double lossfunction(const std::vector<double>& maps) const override {
         return -detail::par_sum1(len_, [this, &maps](std::size_t i) {
             return std::log(maps[i] + precompute_[i]);
@@ -1213,8 +1349,10 @@ public:
         return detail::to_vec(K * detail::to_eigen(pi0));
     }
 
-    void gradfun(double mu, const std::vector<double>& dens, bool d0, bool d1,
-                 double& a0, double& a1) const override {
+    void gradfun(double mu, const std::vector<double>& dens,
+                 SolveCtx& ctx, bool d0, bool d1, double& a0,
+                 double& a1) const override {
+        (void)ctx;
         (void)d1;
         if (!d0) {
             a0 = a1 = 0.0;
@@ -1222,20 +1360,20 @@ public:
         }
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
+        ensure_fl(dens);
         const std::vector<double>& col = kc_.column(mu);
-        double sum_temp = 0.0, dens_dot_fl = 0.0;
-        for (std::size_t i = 0; i < n; ++i) {
-            const double fl = 1.0 / (dens[i] + precompute_[i]);
-            sum_temp += col[i] * scale * fl;
-            dens_dot_fl += dens[i] * fl;
-        }
-        a0 = dens_dot_fl - sum_temp;
+        double sum_temp = 0.0;
+        for (std::size_t i = 0; i < n; ++i)
+            sum_temp += col[i] * scale * fl_[i];
+        a0 = dens_dot_fl_ - sum_temp;
         a1 = 0.0;
     }
 
-    void gradfunvec(const std::vector<double>& mu, const std::vector<double>& dens,
-                    bool d0, bool d1, std::vector<double>& a0,
+    void gradfunvec(const std::vector<double>& mu,
+                    const std::vector<double>& dens, SolveCtx& ctx, bool d0,
+                    bool d1, std::vector<double>& a0,
                     std::vector<double>& a1) const override {
+        (void)ctx;
         (void)d1;
         const std::size_t m = mu.size();
         a0.assign(m, 0.0);
@@ -1244,13 +1382,7 @@ public:
             return;
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
-        std::vector<double> fullden(n);
-        double dens_dot_fl = 0.0;
-        for (std::size_t i = 0; i < n; ++i) {
-            const double fl = 1.0 / (dens[i] + precompute_[i]);
-            fullden[i] = fl;
-            dens_dot_fl += dens[i] * fl;
-        }
+        ensure_fl(dens);
         const std::size_t k = d0 ? m : 0;
         if (k == 0)
             return;
@@ -1259,8 +1391,8 @@ public:
                 const std::vector<double>& col = kc_.column(mu[j]);
                 double s = 0.0;
                 for (std::size_t i = 0; i < n; ++i)
-                    s += col[i] * fullden[i];
-                a0[j] = dens_dot_fl - s * scale;
+                    s += col[i] * fl_[i];
+                a0[j] = dens_dot_fl_ - s * scale;
             }
     }
 
@@ -1342,6 +1474,11 @@ private:
     std::vector<double> mu0fixed_, pi0fixed_;
     std::vector<double> precompute_;
     kern::KernelColumnCache kc_;
+    // Per-solve invariants (see `prepare_solve`); the `dens` pointer the
+    // cache was built for (a different `dens` triggers a rebuild).
+    std::vector<double> fl_;
+    double dens_dot_fl_ = 0.0;
+    const std::vector<double>* cached_fl_dens_ = nullptr;
 };
 
 // ===========================================================================
@@ -1362,6 +1499,31 @@ public:
 
     const std::vector<double>& precompute() const override { return precompute_; }
 
+    // Build the per-solve invariants from `dens` (the engine calls this
+    // once per `solvegrad`; same loop and accumulation order as the former
+    // per-call evaluation, so a hit is bit-identical).
+    void prepare_solve(const std::vector<double>& dens) override {
+        fl_.clear();
+        dens_dot_fl_ = 0.0;
+        cached_fl_dens_ = nullptr;
+        if (dens.size() != len_)
+            return;
+        fl_.resize(len_);
+        double s = 0.0;
+        for (std::size_t i = 0; i < len_; ++i) {
+            const double f = weights_[i] / (dens[i] + precompute_[i]);
+            fl_[i] = f;
+            s += dens[i] * f;
+        }
+        dens_dot_fl_ = s;
+        cached_fl_dens_ = &dens;
+    }
+
+    void ensure_fl(const std::vector<double>& dens) const {
+        if (fl_.empty() || &dens != cached_fl_dens_)
+            const_cast<NpPoisLL*>(this)->prepare_solve(dens);
+    }
+
     double lossfunction(const std::vector<double>& maps) const override {
         return -detail::par_sum1(len_, [this, &maps](std::size_t i) {
             return std::log(maps[i] + precompute_[i]) * weights_[i];
@@ -1373,8 +1535,10 @@ public:
         return kern::dnppois(data_, mu0, pi0);
     }
 
-    void gradfun(double mu, const std::vector<double>& dens, bool d0, bool d1,
-                 double& a0, double& a1) const override {
+    void gradfun(double mu, const std::vector<double>& dens,
+                 SolveCtx& ctx, bool d0, bool d1, double& a0,
+                 double& a1) const override {
+        (void)ctx;
         (void)d1;
         if (!d0) {
             a0 = a1 = 0.0;
@@ -1382,17 +1546,19 @@ public:
         }
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
+        ensure_fl(dens);
         a0 = detail::par_sum1(n, [this, mu, &dens, scale](std::size_t i) {
-            const double d = dens[i] + precompute_[i];
-            const double fl = weights_[i] / d;
-            return (dens[i] - kern::pois_pmf_c(data_[i], mu) * scale) * fl;
+            const double base = fl_[i];
+            return (dens[i] - kern::pois_pmf_c(data_[i], mu) * scale) * base;
         });
         a1 = 0.0;
     }
 
-    void gradfunvec(const std::vector<double>& mu, const std::vector<double>& dens,
-                    bool d0, bool d1, std::vector<double>& a0,
+    void gradfunvec(const std::vector<double>& mu,
+                    const std::vector<double>& dens, SolveCtx& ctx, bool d0,
+                    bool d1, std::vector<double>& a0,
                     std::vector<double>& a1) const override {
+        (void)ctx;
         (void)d1;
         const std::size_t m = mu.size();
         a0.assign(m, 0.0);
@@ -1401,26 +1567,20 @@ public:
             return;
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
-        std::vector<double> fullden(n);
-        double dens_dot = 0.0;
-        for (std::size_t i = 0; i < n; ++i) {
-            const double d = dens[i] + precompute_[i];
-            fullden[i] = weights_[i] / d;
-            dens_dot += dens[i] * fullden[i];
-        }
+        ensure_fl(dens);
         const std::size_t k = d0 ? m : 0;
         if (k == 0)
             return;
         const std::vector<double> acc =
-            detail::par_acc(n, k, [this, &mu, m, &fullden](std::size_t i, double* a) {
-                const double base = fullden[i];
+            detail::par_acc(n, k, [this, &mu, m](std::size_t i, double* a) {
+                const double base = fl_[i];
                 const double xi = data_[i];
                 for (std::size_t j = 0; j < m; ++j)
                     a[j] += kern::pois_pmf_c(xi, mu[j]) * base;
             });
         for (std::size_t j = 0; j < m; ++j)
             if (d0)
-                a0[j] = dens_dot - acc[j] * scale;
+                a0[j] = dens_dot_fl_ - acc[j] * scale;
     }
 
     void computeweights(const std::vector<double>& mu0, std::vector<double>& pi0,
@@ -1508,6 +1668,11 @@ private:
     std::vector<double> weights_;
     std::vector<double> mu0fixed_, pi0fixed_;
     std::vector<double> precompute_;
+    // Per-solve invariants (see `prepare_solve`); the `dens` pointer the
+    // cache was built for (a different `dens` triggers a rebuild).
+    std::vector<double> fl_;
+    double dens_dot_fl_ = 0.0;
+    const std::vector<double>* cached_fl_dens_ = nullptr;
 };
 
 // ===========================================================================
@@ -1584,6 +1749,31 @@ public:
         return precompute_;
     }
 
+    // Build the per-solve invariants from `dens` (the engine calls this
+    // once per `solvegrad`; same loop and accumulation order as the former
+    // per-call evaluation, so a hit is bit-identical).
+    void prepare_solve(const std::vector<double>& dens) override {
+        fl_.clear();
+        dens_dot_fl_ = 0.0;
+        cached_fl_dens_ = nullptr;
+        if (dens.size() != len_)
+            return;
+        fl_.resize(len_);
+        double s = 0.0;
+        for (std::size_t i = 0; i < len_; ++i) {
+            const double f = weights_[i] / (dens[i] + precompute_[i]);
+            fl_[i] = f;
+            s += dens[i] * f;
+        }
+        dens_dot_fl_ = s;
+        cached_fl_dens_ = &dens;
+    }
+
+    void ensure_fl(const std::vector<double>& dens) const {
+        if (fl_.empty() || &dens != cached_fl_dens_)
+            const_cast<NpNormLLW*>(this)->prepare_solve(dens);
+    }
+
     double lossfunction(const std::vector<double>& maps) const override {
         // -sum_i log(maps[i] + pre[i]) * count_i (weighted log-likelihood).
         return -detail::par_sum1(len_, [this, &maps](std::size_t i) {
@@ -1609,14 +1799,17 @@ public:
 
     // Only the probability-direction gradient `a0` is defined (the R class
     // leaves `a1` uninitialised; the `d0` solver never reads it).
-    void gradfun(double mu, const std::vector<double>& dens, bool d0, bool d1,
-                 double& a0, double& a1) const override {
+    void gradfun(double mu, const std::vector<double>& dens,
+                 SolveCtx& ctx, bool d0, bool d1, double& a0,
+                 double& a1) const override {
+        (void)ctx;
         (void)d1;
         if (!d0) {
             a0 = a1 = 0.0;
             return;
         }
         const double scale = 1.0 - sum_pi0fixed();
+        ensure_fl(dens);
         // temp = dnpdiscnorm_(data, mu, scale, beta, h): the single support
         // point `mu` carrying the remaining mass `scale` (column j * pi0[j],
         // single column — the i-outer/j-inner accumulation of `dnpdiscnorm`).
@@ -1626,14 +1819,20 @@ public:
             temp[i] = D(i, 0) * scale;
         double s = 0.0;
         for (std::size_t i = 0; i < len_; ++i)
+            // Keep the per-point division inline (the historical expression):
+            // the pre-cached reciprocal would round differently under FMA
+            // contraction and drift the trajectory by ~1 ulp (see the golden
+            // gate). The scalar path is not the hot loop — the vector path is.
             s += (dens[i] - temp[i]) * weights_[i] / (dens[i] + precompute_[i]);
         a0 = s;
         a1 = 0.0;
     }
 
-    void gradfunvec(const std::vector<double>& mu, const std::vector<double>& dens,
-                    bool d0, bool d1, std::vector<double>& a0,
+    void gradfunvec(const std::vector<double>& mu,
+                    const std::vector<double>& dens, SolveCtx& ctx, bool d0,
+                    bool d1, std::vector<double>& a0,
                     std::vector<double>& a1) const override {
+        (void)ctx;
         (void)d1;
         const std::size_t m = mu.size();
         a0.assign(m, 0.0);
@@ -1642,21 +1841,13 @@ public:
             return;
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
-        // fullden[i] = count_i / (dens[i] + pre[i]); dens_dot = sum_i
-        // dens[i] * fullden[i].
-        std::vector<double> fullden(n);
-        double dens_dot = 0.0;
-        for (std::size_t i = 0; i < n; ++i) {
-            const double fl = weights_[i] / (dens[i] + precompute_[i]);
-            fullden[i] = fl;
-            dens_dot += dens[i] * fl;
-        }
+        ensure_fl(dens);
         const Eigen::MatrixXd& D = dmat(mu);
-        const Eigen::Map<const Eigen::VectorXd> fv(fullden.data(),
+        const Eigen::Map<const Eigen::VectorXd> fv(fl_.data(),
                                                    static_cast<Eigen::Index>(n));
         const Eigen::VectorXd kfl = D.transpose() * fv;
         for (std::size_t j = 0; j < m; ++j)
-            a0[j] = dens_dot -
+            a0[j] = dens_dot_fl_ -
                     kfl(static_cast<Eigen::Index>(j)) * scale;
     }
 
@@ -1756,6 +1947,11 @@ private:
     double h_;
     std::vector<double> mu0fixed_, pi0fixed_;
     std::vector<double> precompute_;
+    // Per-solve invariants (see `prepare_solve`); the `dens` pointer the
+    // cache was built for (a different `dens` triggers a rebuild).
+    std::vector<double> fl_;
+    double dens_dot_fl_ = 0.0;
+    const std::vector<double>* cached_fl_dens_ = nullptr;
 };
 
 // ---------------------------------------------------------------------------
@@ -1794,6 +1990,26 @@ public:
         return precompute_;
     }
 
+    // Build the per-solve invariants from `dens` (the engine calls this
+    // once per `solvegrad`; same loop and accumulation order as the former
+    // per-call evaluation, so a hit is bit-identical).
+    void prepare_solve(const std::vector<double>& dens) override {
+        fl_.clear();
+        fd_dot_dens_ = 0.0;
+        cached_fl_dens_ = nullptr;
+        if (dens.size() != len_)
+            return;
+        fl_.resize(len_);
+        for (std::size_t i = 0; i < len_; ++i)
+            fl_[i] = (dens[i] - precompute_[i]) * weights_[i];
+        cached_fl_dens_ = &dens;
+    }
+
+    void ensure_fl(const std::vector<double>& dens) const {
+        if (fl_.empty() || &dens != cached_fl_dens_)
+            const_cast<NpNormCVMW*>(this)->prepare_solve(dens);
+    }
+
     double lossfunction(const std::vector<double>& maps) const override {
         // CVM: a squared distance, minimised, count-weighted:
         // sum_i (maps[i] - pre[i])^2 * count_i.
@@ -1821,42 +2037,45 @@ public:
         return out;
     }
 
-    void gradfun(double mu, const std::vector<double>& dens, bool d0, bool d1,
-                 double& a0, double& a1) const override {
+    void gradfun(double mu, const std::vector<double>& dens,
+                 SolveCtx& ctx, bool d0, bool d1, double& a0,
+                 double& a1) const override {
+        (void)ctx;
         if (!d0 && !d1) {
             a0 = a1 = 0.0;
             return;
         }
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
-        // fullden[i] = (dens[i] - pre[i]) * count_i.
-        std::vector<double> fullden(n);
-        for (std::size_t i = 0; i < n; ++i)
-            fullden[i] = (dens[i] - precompute_[i]) * weights_[i];
-        // d0: 2 * sum_i (Phi_disc(mu; scale) - dens[i]) * fullden[i], where
+        // fl_[i] = (dens[i] - pre[i]) * count_i (per-solve invariant, see
+        // `prepare_solve`).
+        ensure_fl(dens);
+        // d0: 2 * sum_i (Phi_disc(mu; scale) - dens[i]) * fl_[i], where
         // Phi_disc(mu; scale) is the single-point binned-cdf mixture.
         double sum_new = 0.0;
         if (d0) {
             // pcol = P({mu}) * scale (single column, as `pnpdiscnorm`).
             const Eigen::MatrixXd& P = pmat({mu});
             for (std::size_t i = 0; i < n; ++i)
-                sum_new += (P(i, 0) * scale - dens[i]) * fullden[i];
+                sum_new += (P(i, 0) * scale - dens[i]) * fl_[i];
         }
-        // d1: -2*scale * sum_i N_disc(x_i; mu) * fullden[i] (binned pdf,
+        // d1: -2*scale * sum_i N_disc(x_i; mu) * fl_[i] (binned pdf,
         // pi0 = 1.0 in the `dnpdiscnorm` single column).
         double sum_d1 = 0.0;
         if (d1) {
             const Eigen::MatrixXd& D = dmat({mu});
             for (std::size_t i = 0; i < n; ++i)
-                sum_d1 += D(i, 0) * 1.0 * fullden[i];
+                sum_d1 += D(i, 0) * 1.0 * fl_[i];
         }
         a0 = d0 ? sum_new * 2.0 : 0.0;
         a1 = d1 ? sum_d1 * (-2.0 * scale) : 0.0;
     }
 
-    void gradfunvec(const std::vector<double>& mu, const std::vector<double>& dens,
-                    bool d0, bool d1, std::vector<double>& a0,
+    void gradfunvec(const std::vector<double>& mu,
+                    const std::vector<double>& dens, SolveCtx& ctx, bool d0,
+                    bool d1, std::vector<double>& a0,
                     std::vector<double>& a1) const override {
+        (void)ctx;
         const std::size_t m = mu.size();
         a0.assign(m, 0.0);
         a1.assign(m, 0.0);
@@ -1864,9 +2083,7 @@ public:
             return;
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
-        std::vector<double> fullden(n);
-        for (std::size_t i = 0; i < n; ++i)
-            fullden[i] = (dens[i] - precompute_[i]) * weights_[i];
+        ensure_fl(dens);
         const bool do0 = d0, do1 = d1;
         if (!do0 && !do1)
             return;
@@ -1876,13 +2093,13 @@ public:
             if (do0) {
                 double s = 0.0;
                 for (std::size_t i = 0; i < n; ++i)
-                    s += (P(i, j) * scale - dens[i]) * fullden[i];
+                    s += (P(i, j) * scale - dens[i]) * fl_[i];
                 a0[j] = s * 2.0;
             }
             if (do1) {
                 double s = 0.0;
                 for (std::size_t i = 0; i < n; ++i)
-                    s += D(i, j) * fullden[i];
+                    s += D(i, j) * fl_[i];
                 a1[j] = s * (-2.0 * scale);
             }
         }
@@ -1991,6 +2208,11 @@ private:
     double h_;
     std::vector<double> mu0fixed_, pi0fixed_;
     std::vector<double> precompute_;
+    // Per-solve invariants (see `prepare_solve`); the `dens` pointer the
+    // cache was built for (a different `dens` triggers a rebuild).
+    std::vector<double> fl_;
+    double fd_dot_dens_ = 0.0;
+    const std::vector<double>* cached_fl_dens_ = nullptr;
 };
 
 // ---------------------------------------------------------------------------
@@ -2039,6 +2261,31 @@ public:
         return precompute_;
     }
 
+    // Build the per-solve invariants from `dens` (the engine calls this
+    // once per `solvegrad`; same loop and accumulation order as the former
+    // per-call evaluation, so a hit is bit-identical).
+    void prepare_solve(const std::vector<double>& dens) override {
+        s1_.clear();
+        sum_w2_term_ = 0.0;
+        cached_fl_dens_ = nullptr;
+        if (dens.size() != len_)
+            return;
+        s1_.resize(len_);
+        double s = 0.0;
+        for (std::size_t i = 0; i < len_; ++i) {
+            const double fl = dens[i] + precompute_[i];
+            s1_[i] = w1_[i] / fl - w2_[i] / (1.0 - fl);
+            s += w2_[i] / (1.0 - fl);
+        }
+        sum_w2_term_ = s;
+        cached_fl_dens_ = &dens;
+    }
+
+    void ensure_fl(const std::vector<double>& dens) const {
+        if (s1_.empty() || &dens != cached_fl_dens_)
+            const_cast<NpNormADW*>(this)->prepare_solve(dens);
+    }
+
     double lossfunction(const std::vector<double>& maps) const override {
         return -detail::par_sum1(len_, [this, &maps](std::size_t i) {
             const double t = maps[i] + precompute_[i];
@@ -2064,44 +2311,43 @@ public:
         return out;
     }
 
-    void gradfun(double mu, const std::vector<double>& dens, bool d0, bool d1,
-                 double& a0, double& a1) const override {
+    void gradfun(double mu, const std::vector<double>& dens,
+                 SolveCtx& ctx, bool d0, bool d1, double& a0,
+                 double& a1) const override {
+        (void)ctx;
         if (!d0 && !d1) {
             a0 = a1 = 0.0;
             return;
         }
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
-        std::vector<double> s1(n);
-        for (std::size_t i = 0; i < n; ++i) {
-            const double fl = dens[i] + precompute_[i];
-            s1[i] = w1_[i] / fl - w2_[i] / (1.0 - fl);
-        }
-        double s1_dot_new = 0.0, sum_w2_term = 0.0;
+        // s1_[i] = w1/fl - w2/(1-fl) (per-solve invariant, see
+        // `prepare_solve`).
+        ensure_fl(dens);
+        double s1_dot_new = 0.0;
         if (d0) {
             // pcol[i] = P(i, 0) * scale (single column, as `pnpdiscnorm`).
             const Eigen::MatrixXd& P = pmat({mu});
-            for (std::size_t i = 0; i < n; ++i) {
-                s1_dot_new += s1[i] * (P(i, 0) * scale + precompute_[i]);
-                sum_w2_term +=
-                    w2_[i] / (1.0 - (dens[i] + precompute_[i]));
-            }
+            for (std::size_t i = 0; i < n; ++i)
+                s1_dot_new += s1_[i] * (P(i, 0) * scale + precompute_[i]);
         }
         // d1 uses the UNBINNED normal pdf shifted by -h (R's `dnpnorm_(data,
         // mu - h, scale, beta)`).
         double s1_dot_d1 = 0.0;
         if (d1)
             for (std::size_t i = 0; i < n; ++i)
-                s1_dot_d1 += s1[i] * stats::dnorm(data_[i], mu - h_, beta_) * scale;
-        a0 = d0 ? (s1_dot_new + sum_w2_term) * -1.0 +
+                s1_dot_d1 += s1_[i] * stats::dnorm(data_[i], mu - h_, beta_) * scale;
+        a0 = d0 ? (s1_dot_new + sum_w2_term_) * -1.0 +
                       2.0 * detail::weights_sum_of(weights_)
                 : 0.0;
         a1 = d1 ? s1_dot_d1 : 0.0;
     }
 
-    void gradfunvec(const std::vector<double>& mu, const std::vector<double>& dens,
-                    bool d0, bool d1, std::vector<double>& a0,
+    void gradfunvec(const std::vector<double>& mu,
+                    const std::vector<double>& dens, SolveCtx& ctx, bool d0,
+                    bool d1, std::vector<double>& a0,
                     std::vector<double>& a1) const override {
+        (void)ctx;
         const std::size_t m = mu.size();
         a0.assign(m, 0.0);
         a1.assign(m, 0.0);
@@ -2109,16 +2355,8 @@ public:
             return;
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
-        std::vector<double> s1(n);
-        for (std::size_t i = 0; i < n; ++i) {
-            const double fl = dens[i] + precompute_[i];
-            s1[i] = w1_[i] / fl - w2_[i] / (1.0 - fl);
-        }
-        const double sum_w2_term =
-            d0 ? detail::par_sum1(n, [this, &dens](std::size_t i) {
-                    return w2_[i] / (1.0 - (dens[i] + precompute_[i]));
-                })
-               : 0.0;
+        ensure_fl(dens);
+        const double sum_w2_term = d0 ? sum_w2_term_ : 0.0;
         if (!d0 && !d1)
             return;
         const Eigen::MatrixXd& P = d0 ? pmat(mu) : detail::empty_m();
@@ -2126,14 +2364,14 @@ public:
             if (d0) {
                 double s = 0.0;
                 for (std::size_t i = 0; i < n; ++i)
-                    s += (P(i, j) * scale + precompute_[i]) * s1[i];
+                    s += (P(i, j) * scale + precompute_[i]) * s1_[i];
                 a0[j] = s * -1.0 +
                         2.0 * detail::weights_sum_of(weights_) - sum_w2_term;
             }
             if (d1) {
                 double s = 0.0;
                 for (std::size_t i = 0; i < n; ++i)
-                    s += stats::dnorm(data_[i], mu[j] - h_, beta_) * s1[i];
+                    s += stats::dnorm(data_[i], mu[j] - h_, beta_) * s1_[i];
                 a1[j] = s * scale;
             }
         }
@@ -2247,6 +2485,11 @@ private:
     std::vector<double> precompute_;
     std::vector<double> w1_, w2_;
     mutable detail::KernelMemo pmemo_;
+    // Per-solve invariants (see `prepare_solve`); the `dens` pointer the
+    // cache was built for (a different `dens` triggers a rebuild).
+    std::vector<double> s1_;
+    double sum_w2_term_ = 0.0;
+    const std::vector<double>* cached_fl_dens_ = nullptr;
 };
 
 // ---------------------------------------------------------------------------
@@ -2298,6 +2541,31 @@ public:
         return precompute_;
     }
 
+    // Build the per-solve invariants from `dens` (the engine calls this
+    // once per `solvegrad`; same loop and accumulation order as the former
+    // per-call evaluation, so a hit is bit-identical).
+    void prepare_solve(const std::vector<double>& dens) override {
+        fl_.clear();
+        dens_dot_fl_ = 0.0;
+        cached_fl_dens_ = nullptr;
+        if (dens.size() != len_)
+            return;
+        fl_.resize(len_);
+        double s = 0.0;
+        for (std::size_t i = 0; i < len_; ++i) {
+            const double f = weights_[i] / (dens[i] + precompute_[i]);
+            fl_[i] = f;
+            s += dens[i] * f;
+        }
+        dens_dot_fl_ = s;
+        cached_fl_dens_ = &dens;
+    }
+
+    void ensure_fl(const std::vector<double>& dens) const {
+        if (fl_.empty() || &dens != cached_fl_dens_)
+            const_cast<NpTLLW*>(this)->prepare_solve(dens);
+    }
+
     double lossfunction(const std::vector<double>& maps) const override {
         return -detail::par_sum1(len_, [this, &maps](std::size_t i) {
             return std::log(maps[i] + precompute_[i]) * weights_[i];
@@ -2312,8 +2580,10 @@ public:
         return detail::to_vec(K * detail::to_eigen(pi0));
     }
 
-    void gradfun(double mu, const std::vector<double>& dens, bool d0, bool d1,
-                 double& a0, double& a1) const override {
+    void gradfun(double mu, const std::vector<double>& dens,
+                 SolveCtx& ctx, bool d0, bool d1, double& a0,
+                 double& a1) const override {
+        (void)ctx;
         (void)d1;
         if (!d0) {
             a0 = a1 = 0.0;
@@ -2321,19 +2591,20 @@ public:
         }
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
+        ensure_fl(dens);
         const std::vector<double>& col = kc_.column(mu);
         double s = 0.0;
-        for (std::size_t i = 0; i < n; ++i) {
-            const double fl = weights_[i] / (dens[i] + precompute_[i]);
-            s += (dens[i] - col[i] * scale) * fl;
-        }
+        for (std::size_t i = 0; i < n; ++i)
+            s += (dens[i] - col[i] * scale) * fl_[i];
         a0 = s;
         a1 = 0.0;
     }
 
-    void gradfunvec(const std::vector<double>& mu, const std::vector<double>& dens,
-                    bool d0, bool d1, std::vector<double>& a0,
+    void gradfunvec(const std::vector<double>& mu,
+                    const std::vector<double>& dens, SolveCtx& ctx, bool d0,
+                    bool d1, std::vector<double>& a0,
                     std::vector<double>& a1) const override {
+        (void)ctx;
         (void)d1;
         const std::size_t m = mu.size();
         a0.assign(m, 0.0);
@@ -2342,13 +2613,7 @@ public:
             return;
         const double scale = 1.0 - sum_pi0fixed();
         const std::size_t n = len_;
-        std::vector<double> fullden(n);
-        double dens_dot = 0.0;
-        for (std::size_t i = 0; i < n; ++i) {
-            const double fl = weights_[i] / (dens[i] + precompute_[i]);
-            fullden[i] = fl;
-            dens_dot += dens[i] * fl;
-        }
+        ensure_fl(dens);
         const std::size_t g = kgrid_.size();
         const bool cached =
             g == m && kmat_.size() == n * g &&
@@ -2363,8 +2628,8 @@ public:
             const double* col = colp ? colp->data() : kdata + j * n;
             double s = 0.0;
             for (std::size_t i = 0; i < n; ++i)
-                s += col[i] * fullden[i];
-            a0[j] = dens_dot - s * scale;
+                s += col[i] * fl_[i];
+            a0[j] = dens_dot_fl_ - s * scale;
         }
     }
 
@@ -2454,6 +2719,11 @@ private:
     std::vector<double> precompute_;
     std::vector<double> kgrid_, kmat_;
     kern::KernelColumnCache kc_;
+    // Per-solve invariants (see `prepare_solve`); the `dens` pointer the
+    // cache was built for (a different `dens` triggers a rebuild).
+    std::vector<double> fl_;
+    double dens_dot_fl_ = 0.0;
+    const std::vector<double>* cached_fl_dens_ = nullptr;
 };
 
 }  // namespace fam
