@@ -208,12 +208,14 @@ Eigen 5.0.0 nor R's RcppEigen 3.4.0 ships a double-precision SIMD
 ### 4a. The `npnorm2Dll` (2-D) exception
 
 The 2-D experimental family is still the one documented case where this
-port is slower than R. A hand-unrolled 2×2 density-kernel fast path
-(see below) closed most of the old ~28× gap on the reference run:
+port is slower than R. Two fast paths — a hand-unrolled 2×2 density
+kernel and an explicit-inverse objective (§4a.2, the default) — closed
+most of the old ~28× gap on the reference run:
 
 | case (same machine, same data n=300, same initial mix & grid) | `npfixedcomppy` | R | ratio |
 |---|---|---|---|
-| `computemixdist(X, method="npnorm2Dll")`, 2-D n=300 | ≈ 4.3 s (median of 5) | ≈ 0.75 s (best of 3) | ~5.7× slower |
+| 2-D n=300, fast path (default) | ≈ 2.7 s (median of 5) | ≈ 0.75 s (best of 3) | ~3.5× slower |
+| 2-D n=300, R-identical path (`NPFIC_2D_EXACT=1`) | ≈ 4.3 s (median of 5) | — | — |
 
 Verified decomposition (this build):
 
@@ -235,40 +237,54 @@ Verified decomposition (this build):
   ≈ 7.4 µs/call (the `dim ≠ 2` path is unchanged).
 * **The cross-evaluation parity is unchanged by the fast path.** PY's
   kernel evaluated at R's final points gives ll = 848.8877528768896
-  (R's own: 848.88775287688986), and R's kernel at PY's final points
-  gives 848.7472820349071 (PY's own: 848.747282034907) — both
-  cross-evaluations match an independent numpy recomputation to
-  < 1e-12, and the fit's reported `ll` / iteration trajectory are
-  bit-identical to the pre-optimization build.
+  (R's own: 848.88775287688986), and R's kernel at the R-identical
+  path's final points gives 848.7472820349071 (the exact path's own:
+  848.747282034907) — both cross-evaluations match an independent
+  numpy recomputation to < 1e-12. The kernel fast path itself is
+  bit-exact: with `NPFIC_2D_EXACT=1` the fit reproduces the
+  pre-objective-fast-path build's ll / iteration trajectory bit-for-bit.
+  The **default** fast objective path (§4a.2) differs from that
+  trajectory by ~1e-13 in the objective values (ll 848.7611702303334
+  on the reference run) and accepts a slightly different cell set on
+  some data.
 * **The remaining cost is the L-BFGS-B support-point search.** The
   family runs one box-constrained L-BFGS-B problem per grid cell
   (103 × 103 = 10,609 sub-problems per outer iteration × 6 iterations)
-  plus a weight subproblem and a collapse per iteration.
-  `NPFIXEDCOMPY_PROFILE=1` reports `objevals=421810` for the n=300
-  reference run. At ≈ 7.4 µs per `dnpnormND` call, the density kernel
-  is ≈ 3.1 s of the 4.3 s; the rest is the per-evaluation gradient
-  temporaries in `gradfun` (`fullden`, `temp`, the 300×2 replicated
-  `murep` — again heap temporaries MSVC keeps while the R build's GCC
-  eliminates them) and the per-cell L-BFGSpp machinery (problem
-  construction, Cauchy-point / subspace-minimization bookkeeping,
-  backtracking). The per-cell early-exit (`projgnorm ≤ ε` on the
-  initial midpoint) fires for the empty cells in both implementations.
+  plus a weight subproblem and a collapse per iteration. The per-cell
+  early-exit (`projgnorm ≤ ε` on the initial midpoint, executed on the
+  first evaluation) is what makes most cells cheap; the cost is the
+  non-exit cells. On the n=300 reference run `NPFIXEDCOMPY_PROFILE=1`
+  reports `objevals=421810` for **both** objective paths — the
+  trajectories there accept the same cells, and the whole 4.3 s →
+  2.7 s gain is the per-evaluation kernel cost (≈ 10.1 µs exact →
+  ≈ 6.3 µs fast, §4a.2). On the second n=300 benchmark the ~1e-13
+  kernel difference *does* flip the near-zero per-cell objective signs
+  of a few cells, the accepted set changes, and the evaluation count
+  itself drops 769,533 → 251,704 (wall 7.0 s → 2.5 s).
 * **The result is a valid — in the reference run, slightly better —
-  local optimum.** The search accepts a grid cell only on a *strictly*
-  negative objective, which is exquisitely sensitive to the
-  floating-point trajectory; PY and R each converge deterministically
-  (6 iterations both sides) to different optima, PY's NLL 848.747282034907
-  vs R's 848.88775287688986 (lower is better). `tests/verify_2d_same.py`
-  pins all of this as the parity gate for the family.
+  local optimum, on both objective paths.** The search accepts a grid
+  cell only on a *strictly* negative objective, which is exquisitely
+  sensitive to the floating-point trajectory; both paths converge
+  deterministically in 6 iterations: exact path NLL 848.747282034907,
+  fast path 848.7611702303334, R's 848.88775287688986 (lower is
+  better). The main components of the two PY mixtures agree within
+  ≈ 0.06 in location. `tests/verify_2d_same.py` pins all of this as the
+  family's gate (per-path determinism, ll bands, kernel parity vs R,
+  and fast-vs-exact mixture similarity).
 
 This is inherited algorithmic structure, not a port defect: the R
 package documents `npnorm2Dll` as *experimental and possibly very slow*,
-and the per-cell L-BFGS-B loop is the documented design. Folding the
-per-evaluation gradient temporaries into scalars (or a cell-pruning
-heuristic) would be the obvious next speed-up; neither has been added
-because both change the floating-point trajectory of the support-point
-search and therefore which (valid) optimum is found, which the
-match-to-R contract treats as out of scope for this family.
+and the per-cell L-BFGS-B loop is the documented design. The
+per-evaluation gradient temporaries *have* now been folded into scalars
+and the invariant re-computations removed (§4a.2); that changed the
+floating-point trajectory of the support-point search — which the old
+match-to-R contract forbade — and is only the default now because the
+contract was relaxed to *similar result, faster wall time* (the
+R-identical path remains available via `NPFIC_2D_EXACT=1`). The
+remaining ~3.5× gap is the per-cell L-BFGS-B evaluation cost itself
+(421,810 objective evaluations at ≈ 6.3 µs on the reference run —
+251,704 at ≈ 9.9 µs on the second benchmark), which §4a.1 concludes
+no faster *and* similar-result solver can reduce.
 
 #### 4a.1 Solver replacement evaluated: CppNumericalSolvers, NLopt, and a wider sweep
 
@@ -277,9 +293,11 @@ The per-cell solver was evaluated against **CppNumericalSolvers**
 (not present in this environment), and a wider literature sweep of
 bound-constrained and mixture-model algorithms was performed. No
 rejected candidate was vendored into the package — the tree adds no
-external dependency, and the default path is byte-identical to the
-pre-evaluation build (`verify_2d_same.py` green: ll
-848.7472820349071 on the reference run, two-run bit-determinism).
+external dependency. The default path is *no longer* byte-identical to
+the pre-evaluation build: the contract relaxed to *similar result,
+faster wall time* (§4a.2 added the fast objective path as the default);
+the R-identical behavior is still exactly reproducible via
+`NPFIC_2D_EXACT=1`, and `verify_2d_same.py` is green on both paths.
 
 * **cppoptlib's `LbfgsbSolver` is a different implementation**, not a
   build of the same code: its convergence test is a hard-coded
@@ -293,7 +311,8 @@ pre-evaluation build (`verify_2d_same.py` green: ll
   of LBFGSpp's rank-1/2 recursion. At n = 2 these costs are tiny, so
   the wall-time difference is almost entirely the extra iterations.
 * **Measured live (n=300 2-D run, same data / initial mix / grid /
-  tol), via a temporary adapter that was removed afterwards:**
+  tol), via a temporary adapter that was removed afterwards — the
+  baseline column is the pre-fast-path (Cholesky-kernel) build:**
 
   | | default LBFGSpp | cppoptlib `LbfgsbSolver` |
   |---|---|---|
@@ -358,6 +377,69 @@ Collapsing the flags would be a cosmetic refactor — it cannot change
 any floating-point trajectory, and the per-evaluation cost is set by
 `dnpnormND`, not by which subset of the gradient is requested.
 
+#### 4a.2 Objective fast path (new default) and the relaxed contract
+
+With the contract relaxed from *bit-exact match to R* to *faster, with
+ll/mixture similar to R's result*, the per-cell objective was re-derived
+for n = 2 (it is the only caller of the full gradient pair):
+
+* **Explicit-inverse quadratic form.** `dᵀΣ⁻¹d` is computed as
+  `inv00·d0² + (inv01+inv10)·d0·d1 + inv11·d1²` from the explicit 2×2
+  inverse of `beta` (precomputed once in the constructor) — 0 divisions
+  per point where the Cholesky-solve kernel needs 4. The normalizing
+  constant keeps R's exact grouping
+  (`LN_SQRT_2PI·2 + 0.5·log det`).
+* **Invariant caching.** `fullden = 1/(dens+precompute)` (300
+  divisions) and the component scale are recomputed on *every*
+  objective evaluation in the old code; they are constant for a whole
+  `solvegrad` pass, so they are cached in `setdens` — ≈ 10⁸ divisions
+  saved per fit with bit-identical values.
+* **Preallocated buffers, same SIMD exp.** The two `n`-length
+  temporaries are constructor-sized buffers; the exponentiation is
+  still Eigen's SIMD `array().exp()` (the identical instruction
+  sequence the R-matching kernel uses — a scalar `std::exp` drifts by
+  1 ulp and was rejected).
+* **Measured (same build; `NPFIXEDCOMPY_PROFILE=1`), reference run**
+  (`tests/parity_2d.csv`):
+
+  | | fast path (default) | exact path (`NPFIC_2D_EXACT=1`) |
+  |---|---|---|
+  | wall (median of 5) | 2654 ms | 4252 ms |
+  | objective evaluations | 421,810 | 421,810 |
+  | per-evaluation | ≈ 6.3 µs | ≈ 10.1 µs |
+  | ll / iters / components | 848.7611702303334 / 6 / 5 | 848.7472820349071 / 6 / 5 |
+
+  The two trajectories accept the **same cells** there, so the entire
+  gain is the per-evaluation kernel cost (0 divisions, no heap
+  temporaries, cached invariants — ≈ 1.6×).
+* **Second n=300 benchmark** (`itercmp/iterdata_2d.csv`):
+
+  | | fast path | exact path |
+  |---|---|---|
+  | wall | ≈ 2.5 s | ≈ 7.0 s |
+  | objective evaluations | 251,704 | 769,533 (3.1×) |
+  | per-evaluation | ≈ 9.9 µs | ≈ 9.1 µs |
+  | ll / iters / components | 983.1383384870023 / 8 / 6 | 982.7562335069146 / 9 / 7 |
+
+  Here the ~1e-13 kernel difference flips the near-zero per-cell
+  objective signs of a few cells, the accepted set changes, and the
+  wall-time gain is the **evaluation count** (2.8× = 3.1× fewer
+  evaluations; per-evaluation cost ≈ unchanged). Per-evaluation
+  figures include the per-cell L-BFGSpp machinery and vary ≈ ±10 %
+  between runs.
+* **Similarity, measured (both datasets, default grid/init/tol):**
+  reference run — both paths 6 iters on the same cell set, main
+  components (weight ≥ 0.02) within 0.057 in location, |Δll| =
+  0.0139; iterdata benchmark — fast ll 983.1383384870023, 8 iters,
+  6 components vs exact ll 982.7562335069146, 9 iters, 7 components
+  (fast drops one w≈0.02 minor component; both are valid and beat
+  R 1.1.0003's 986.236 on that data). The parity gate now checks
+  similarity (per-path determinism, iter count, ll bands, kernel
+  parity vs R, main-component proximity) rather than bit-identity.
+* **Escape hatch.** `NPFIC_2D_EXACT=1` restores the original
+  Cholesky-based kernel — the bit-exact 0.2.1 trajectory — at the old
+  cost.
+
 ## 5. What was *not* done, and why
 
 * **Hand-written OpenMP** — stripped entirely (see section 2); it was a
@@ -406,3 +488,7 @@ for %A in (npnormll nptll cvmadcll pois density binned coveb posteriormean kerne
 
 2-D wall times: `.venv\Scripts\python.exe bench_2d.py` (Py) and
 `Rscript bench_2d_r.R` (R), both reading the shared `parity_2d.csv`.
+The per-objective-path medians behind the §4a tables come from
+`tests/measure_2d.py` — once as-is (fast path, the default) and once
+with `NPFIC_2D_EXACT=1` (the R-identical path); `NPFIXEDCOMPY_PROFILE=1`
+on either run prints the `objevals` line.

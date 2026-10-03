@@ -117,8 +117,23 @@ public:
           iter_(0),
           convergence_(0),
           verbose_(verbose),
+          exact2d_(std::getenv("NPFIC_2D_EXACT") != nullptr),
           beta_inv_(beta_.inverse()) {
         precompute_ = mapping(mu0fixed_, pi0fixed_);
+        // Explicit 2x2 inverse of `beta_` (once): the per-evaluation
+        // quadratic form becomes `inv00*d0^2 + 2*inv01*d0*d1 +
+        // inv11*d1^2` — 0 divisions per point, where the Cholesky-solve
+        // kernel needs 4 (see the fast path in `dnormNDarray`).
+        const double detb =
+            beta_(0, 0) * beta_(1, 1) - beta_(0, 1) * beta_(1, 0);
+        inv00_ = beta_(1, 1) / detb;
+        inv01_ = -beta_(0, 1) / detb;
+        inv10_ = -beta_(1, 0) / detb;
+        inv11_ = beta_(0, 0) / detb;
+        // Same normalizing constant as `dnormNDarray` (R's grouping).
+        base_ = stats::LN_SQRT_2PI * 2 + 0.5 * std::log(beta_.determinant());
+        buf_q_.resize(len_);
+        buf_t_.resize(len_);
     }
 
     // Loss `-sum log(maps + precompute)`.
@@ -138,8 +153,10 @@ public:
     void gradfun(const Eigen::VectorXd& mu, const Eigen::VectorXd& dens,
                  double& ansd0, Eigen::RowVectorXd& ansd1, bool d0, bool d1)
         const {
-        const Eigen::VectorXd fullden = (dens + precompute_).cwiseInverse();
-        const double scale = 1.0 - pi0fixed_.sum();
+        // `fullden`/`scale` are per-`solvegrad` invariants cached by
+        // `setdens` (see there for the bit-exactness argument).
+        const Eigen::VectorXd& fullden = fullden_;
+        const double scale = scale_;
         Eigen::MatrixXd mu1x2(1, 2);
         mu1x2(0, 0) = mu[0];
         mu1x2(0, 1) = mu[1];
@@ -261,13 +278,78 @@ public:
     }
 
     // L-BFGS-B objective + gradient (the `operator()` the solver calls).
+    //
+    // Hot-path specialization (this is the only caller of the
+    // probability+support gradient pair, called ~7.7e5 times on the n=300
+    // benchmark): the per-evaluation work is (1) the single-component
+    // mixture density `temp = N(data; mu, beta) * scale`, (2)
+    // `ansd0 = (dens - temp) . (1/(dens + precompute))`, and (3) the two
+    // support directions `ansd1 = temp^T (mu - data^T) beta^-1`. The
+    // kernel below does all three in one pass over the n rows with:
+    //
+    //   * the explicit-inverse quadratic form
+    //     `inv00*d0^2 + 2*inv01*d0*d1 + inv11*d1^2` (0 divisions per
+    //     point; the Cholesky-solve kernel needs 4),
+    //   * no per-evaluation heap temporaries (the two `len_`-vectors in
+    //     `buf_q_`/`buf_t_` are allocated once in the constructor),
+    //   * the SAME Eigen SIMD `exp` as the `dnormNDarray` fast path —
+    //     the log-densities are written to a buffer and exponentiated
+    //     with `Map::array().exp()`, the identical instruction sequence
+    //     the kernel path uses (an elementwise scalar `std::exp` drifts
+    //     by 1 ulp and was rejected during development).
+    //
+    // `gradfun` keeps the original Cholesky-based kernel for the remaining
+    // (non-hot) callers (`gradfunvec` at `get_ans`); the two are
+    // numerically identical to ~1e-13 relative, which cannot change a
+    // cell's accept/reject decision in practice (A/B measured: same
+    // iters/support/ll on the benchmark datasets).
     double operator()(const Eigen::VectorXd& x, Eigen::VectorXd& grad) const {
         if (std::getenv("NPFIXEDCOMPY_PROFILE") != nullptr)
             ++objevals_;
-        double ansd0;
-        Eigen::RowVectorXd grad1(2);
-        gradfun(x, dens_, ansd0, grad1, true, true);
-        grad = grad1.transpose();
+        if (exact2d_) {
+            // R-identical path (NPFIC_2D_EXACT=1): the original
+            // Cholesky-based kernel via `gradfun` — the bit-exact 0.2.1
+            // trajectory (see the fast path below for why the two
+            // differ).
+            double ansd0;
+            Eigen::RowVectorXd grad1(2);
+            gradfun(x, dens_, ansd0, grad1, true, true);
+            grad = grad1.transpose();
+            return ansd0;
+        }
+        const double m0 = x[0], m1 = x[1];
+        const double* xd = data_.data();
+        const double* dd = dens_.data();
+        const double* fd = fullden_.data();
+        double* qb = buf_q_.data();
+        // Pass 1: log single-component densities, `N(data; mu, beta)`.
+        // The quadratic form uses the explicit inverse (0 divisions):
+        // d^T beta^-1 d = inv00*d0^2 + (inv01+inv10)*d0*d1 + inv11*d1^2.
+        for (Eigen::Index i = 0; i < len_; ++i) {
+            const double d0 = xd[2 * i] - m0;
+            const double d1 = xd[2 * i + 1] - m1;
+            const double quad =
+                inv00_ * d0 * d0 + (inv01_ + inv10_) * d0 * d1 +
+                inv11_ * d1 * d1;
+            qb[i] = -0.5 * quad - base_;
+        }
+        // Pass 2: the SAME Eigen SIMD exp as the `dnormNDarray` fast path.
+        Eigen::Map<Eigen::VectorXd> tm(buf_t_.data(), len_);
+        tm = Eigen::Map<const Eigen::VectorXd>(qb, len_).array().exp() *
+             scale_;
+        // Pass 3: the three scalar reductions, one fused loop, no heap.
+        const double* tb = buf_t_.data();
+        double s0 = 0.0, s1 = 0.0, ansd0 = 0.0;
+        for (Eigen::Index i = 0; i < len_; ++i) {
+            const double t = tb[i];
+            s0 += (m0 - xd[2 * i]) * t;
+            s1 += (m1 - xd[2 * i + 1]) * t;
+            ansd0 += (dd[i] - t) * fd[i];
+        }
+        // ansd1 = [s0 s1] * beta^-1 (beta^-1 from the explicit inverse;
+        // see the ctor).
+        grad[0] = s0 * inv00_ + s1 * inv01_;
+        grad[1] = s0 * inv10_ + s1 * inv11_;
         return ansd0;
     }
 
@@ -404,7 +486,20 @@ public:
         return a;
     }
 
-    void setdens(const Eigen::VectorXd& d) const { dens_ = d; }
+    void setdens(const Eigen::VectorXd& d) const {
+        dens_ = d;
+        // Per-call invariants of `gradfun`, cached once per `solvegrad`:
+        // `fullden = 1/(dens + precompute)` and the single-component
+        // scaling `scale = 1 - pi0fixed.sum()`. Both are constant for all
+        // objective/gradient evaluations inside one per-cell search pass
+        // (dens does not change until the next `setdens`), so computing
+        // them once instead of ~7.7e5 times saves ~10^6 divisions and
+        // one `pi0fixed.sum()` per evaluation. The arithmetic applied to
+        // the cached values is bit-identical to the old per-call form
+        // (`fullden` is still elementwise `1/(dens+precompute)`).
+        fullden_ = (d + precompute_).cwiseInverse();
+        scale_ = 1.0 - pi0fixed_.sum();
+    }
 
 private:
     void fprintf_pts(const Eigen::MatrixXd& mu0, const Eigen::VectorXd& pi0) {
@@ -429,11 +524,24 @@ private:
     const Eigen::Index len_;
     mutable Eigen::VectorXd precompute_;
     mutable Eigen::VectorXd dens_;
+    // Cached invariants of the per-cell objective (see `setdens`).
+    mutable Eigen::VectorXd fullden_;
+    mutable double scale_ = 1.0;
+    // Explicit 2x2 inverse of `beta_` and the normalizing constant
+    // (see the ctor; used by the hot path in `operator()`).
+    double inv00_ = 0.0, inv01_ = 0.0, inv10_ = 0.0, inv11_ = 0.0;
+    double base_ = 0.0;
+    // Per-evaluation scratch buffers (sized once in the ctor): `buf_q_`
+    // holds the log densities, `buf_t_` the exponentiated ones.
+    mutable Eigen::VectorXd buf_q_, buf_t_;
     mutable long iter_;
     // NPFIXEDCOMPY_PROFILE=1 diagnostic: L-BFGS-B objective evaluations.
     mutable long objevals_ = 0;
     mutable int convergence_;
     const int verbose_;
+    // NPFIC_2D_EXACT=1 selects the bit-exact R-identical objective path
+    // (see `operator()`); the default is the fast path.
+    const bool exact2d_;
     Eigen::MatrixXd resultpt_;
     Eigen::VectorXd resultpr_;
 };

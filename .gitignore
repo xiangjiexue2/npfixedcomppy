@@ -25,3 +25,7 @@ build/
 tests/*.log
 tests/npfc_bench_*.csv
 !tests/npfc_bench_data_20000.csv
+
+# Logs & probe/scratch output (root and subdirs)
+*.log
+*.out.txt
