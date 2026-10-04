@@ -17,22 +17,18 @@ jobs:
           - windows-latest
     steps:
       - uses: actions/checkout@v4
-
       # QEMU 用于交叉编译 Linux aarch64
       - name: Set up QEMU
         if: matrix.runner == 'ubuntu-latest'
         uses: docker/setup-qemu-action@v3
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install cibuildwheel
         run: |
           python -m pip install --upgrade pip
           pip install cibuildwheel
-
       - name: Build wheels via cibuildwheel
         run: python -m cibuildwheel --output-dir wheelhouse
         env:
@@ -46,12 +42,10 @@ jobs:
           CIBW_MUSLLINUX_AARCH64_IMAGE: musllinux_1_2
           CIBW_MACOS_DEPLOYMENT_TARGET: "10.15"
           CIBW_TEST_SKIP: "*-musllinux_aarch64"
-
       - name: Build sdist source package
         run: |
           pip install build
           python -m build --sdist --outdir wheelhouse
-
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v5
         with:
@@ -64,16 +58,25 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    # 正则校验tag：仅匹配纯三段数字版本号 x.y.z，拒绝 v0.1.2、abc.1.2、1.2
-    if: github.ref_type == 'tag' && github.ref =~ /^refs\/tags\/[0-9]+\.[0-9]+\.[0-9]+$/
     steps:
+      - name: Check tag name matches x.y.z (no v‑prefix)
+        id: check_tag
+        shell: bash
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "valid=1" >> $GITHUB_OUTPUT
+          else
+              echo "valid=0" >> $GITHUB_OUTPUT
+          fi
       - name: Download built wheels
+        if: steps.check_tag.outputs.valid == '1' && github.ref_type == 'tag'
         uses: actions/download-artifact@v5
         with:
           name: built-wheels
           path: ./wheels
-
       - name: Create Github Release & attach wheels
+        if: steps.check_tag.outputs.valid == '1' && github.ref_type == 'tag'
         uses: softprops/action-gh-release@v3
         with:
           files: ./wheels/*
