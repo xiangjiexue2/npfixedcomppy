@@ -440,6 +440,9 @@ public:
         long iter;
         int convergence;
         double min_gradient;
+        // Grid-level certificate (1D families only; the 2D family leaves
+        // it NaN — its search space is a 2D grid, not a 1D sweep).
+        double grid_gain = std::numeric_limits<double>::quiet_NaN();
         std::vector<std::vector<double>> beta;
         std::string family;
         std::string flag;

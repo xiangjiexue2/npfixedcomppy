@@ -12,45 +12,64 @@ all values in ms unless marked; re-measured on the current build with
 `tests/reprofile_phases.py`). The profiled `total` covers the C++
 engine phases only; the wall times in section 4 additionally include
 Python-side binning and grid generation. `evals` is the count of
-`(mu, dens)` gradient evaluations inside the `solvegrad` loop:
+`(mu, dens)` gradient evaluations inside the `solvegrad` loop;
+`freshcols` / `freshms` count the off-grid kernel columns that had to
+be evaluated for the first time inside that loop (the ones the
+section-3 column cache cannot serve) and time that work:
 
-| case | iters | total | solvegrad | mapping | weights | collapse | loss | evals |
-|------|-------|-------|-----------|---------|---------|----------|------|-------|
-| `nptll` β=5, n=5000 | 31 | **2.36 s** | 2102 | 0.2 | 8.6 | 249 | 0.8 | 3733 |
-| `npnormcll`, n=1000 | 19 | **0.98 s** | 467 | 2.4 | 482 | 29 | 0.1 | 21043 |
-| `npnormadw`, n=5000 | 36 | **332 ms** | 168 | 39 | 74 | 49 | 1.5 | 4314 |
-| `nptllw` β=∞, n=5000 | 15 | **130 ms** | 109 | 0.1 | 6.6 | 14 | 0.3 | 1777 |
-| `npnormllw`, n=5000 | 15 | **31 ms** | 15 | 2.3 | 8.6 | 5.0 | 0.3 | 1755 |
-| `nptll` β=∞, n=5000 | 15 | **45 ms** | 36 | 0.1 | 4.4 | 4.7 | 0.4 | 1758 |
-| `npnormll`, n=5000 | 15 | **17.7 ms** | 11.2 | 0.1 | 3.7 | 2.4 | 0.2 | 1799 |
-| `npnormad`, n=1000 | 11 | **18.5 ms** | 14.6 | 0.0 | 1.4 | 2.4 | 0.1 | 1334 |
+| case | iters | total | solvegrad | mapping | weights | collapse | loss | evals | freshcols | freshms |
+|------|-------|-------|-----------|---------|---------|----------|------|-------|-----------|---------|
+| `nptll` β=5, n=5000 | 11 | **266 ms** | 183 | 0.1 | 2.9 | 80 | 0.3 | 1191 | 61 | 255 |
+| `npnormcll`, n=1000 | 31 | **1233 ms** | 374 | 5.5 | 802 | 53 | 0.2 | 24425 | 11363 | 346 |
+| `npnormadw`, n=5000 | 17 | **184 ms** | 93 | 23 | 48 | 20 | 0.7 | 1859 | 0 | 0 |
+| `nptllw` β=∞, n=5000 | 18 | **35 ms** | 10 | 0.1 | 6.4 | 18 | 0.3 | 1852 | 53 | 22 |
+| `npnormllw`, n=5000 | 18 | **21 ms** | 2.2 | 2.9 | 11 | 4.6 | 0.3 | 1852 | 0 | 0 |
+| `nptll` β=∞, n=5000 | 18 | **21 ms** | 11 | 0.1 | 4.2 | 5.9 | 0.5 | 1852 | 53 | 5.5 |
+| `npnormll`, n=5000 | 17 | **9.9 ms** | 3.8 | 0.1 | 3.1 | 2.8 | 0.3 | 1828 | 157 | 6.8 |
+| `npnormad`, n=1000 | 13 | **19.7 ms** | 14.5 | 0.0 | 1.6 | 3.3 | 0.2 | 1419 | 138 | 20.5 |
+
+(0.2.3 build; 0.2.2's row for `nptll` β=5 was 2334 ms / 3733 evals /
+455 fresh columns — see section 4c for the delta.)
 
 Reading the profile:
 
-* **`nptll` β=5** — dominated by `solvegrad`: the derivative-free
-  support-point search evaluates many *off-grid* points per iteration, and
-  each off-grid point is one full data-column of the non-central-t kernel
-  (`dnt` = AS-243 series, the most expensive kernel in the package). The
+* **`nptll` β=5** — still dominated by `solvegrad`, but the 0.2.3
+  support-search relaxation (section 4c) cut the gradient evaluations
+  3733 → 1191 (3.1×) and the fresh off-grid columns 455 → 61 (7.5×):
+  183 ms of solvegrad wall (the 61 fresh columns account for 255 ms of
+  new-column wall time — each fresh column is one full data-column of
+  the non-central-t kernel, `dnt` = AS-243 series, the most expensive
+  kernel in the package) plus ≈ 80 ms of `collapse` remapping. The
   kernel column cache eliminates the *on-grid* re-evaluations (≈1.4 s of
-  the pre-cache 4.4 s); what remains is the irreducible off-grid work plus
-  the ≈ 249 ms of `collapse` remapping. The pdf's `df`-level constants
-  (`log df`, `√((df+2)/df)`, the `gammln` pair) are precomputed once per
-  run into `stats::DntConst` (used via `dnt_c`, bit-identical to `dnt`),
-  so each off-grid evaluation skips that work.
-* **`npnormcll`** — dominated by `weights` (≈50 %): the per-iteration
+  the pre-cache 4.4 s); the pdf's `df`-level constants (`log df`,
+  `√((df+2)/df)`, the `gammln` pair) are precomputed once per run into
+  `stats::DntConst` (used via `dnt_c`, bit-identical to `dnt`).
+* **The `d0` families' cost is the fresh off-grid columns.** The
+  `freshms`/`total` split on the current build: `nptll` β=5, n=5000 —
+  255 ms of 266 ms (61 fresh columns); `nptllw` — 22 ms of 35 ms
+  (53 fresh columns). Before the 0.2.3 relaxation the same cases ran
+  2304 / 1053 ms of fresh-column work (455 / 300 columns) — the
+  negative-gain early stop (a candidate refinement returns as soon as
+  ANY evaluated point has negative gain; the caller's sign filter accepts
+  any negative point, the exact minimum is not needed) and the CNM
+  re-verification (section 4c) mean most candidates never reach the
+  parabolic refinement that used to mint fresh columns.
+* **`npnormcll`** — dominated by `weights` (≈65 %): the per-iteration
   constrained NNLS subproblem (`pnnlssum` for n ≤ 1000, `pnnqp` beyond),
-  plus the grid sweep in `solvegrad`. These are the algorithm's intrinsic
-  small-matrix solves, not re-evaluation waste.
+  plus the grid sweep in `solvegrad`. These are the algorithm's
+  intrinsic small-matrix solves, not re-evaluation waste. Note 0.2.3
+  also changed WHAT it computes: the free grid-point acceptance (section
+  4c) admits a richer support set (92 → 107 points) and a slightly
+  better ll (4.8e-6 relative vs the 0.2.2 fit), at 19 → 31 iterations —
+  the one family where the relaxation costs wall time (section 4c).
 * **binned normal families (`npnormllw` / `npnormcvmw` / `npnormadw`)** —
-  before the grid-fill memo (section 3) `solvegrad` dominated: the grid
-  sweep rebuilt an (nbins × ngrid) trapezoid fill at every candidate
-  support point (`npnormllw` n=5000: ~108 ms of a 129 ms total). With
-  the memo, the grid sweep is served from the pinned grid fill and
-  `npnormllw` totals **31 ms**; what remains in its `solvegrad` is the
-  off-grid single-point candidate fills (each is a new `mu` vector, so a
-  fresh fill) plus the cheap d1 pdf part. `npnormadw` (332 ms total)
+  the grid sweep is served from the pinned grid fill (section 3), so
+  `npnormllw` totals **21 ms** engine / **28 ms** wall; what remains in
+  its `solvegrad` is the off-grid single-point candidate fills (each is
+  a new `mu` vector, so a fresh fill) plus the cheap d1 pdf part.
+  `npnormadw` (184 ms total, 36 → 17 iterations under the relaxation)
   still churns: its AD re-weighting keeps producing new support sets, so
-  most fills miss the memo, and ~49 ms goes to `collapse`.
+  most fills miss the memo, and ~20 ms goes to `collapse`.
 
 ## 2. Compute core: C++/Eigen (Eigen-internal parallel GEMM when probed)
 
@@ -107,11 +126,14 @@ The determinism contract:
   the parity gates (ll 1e-9, pt 1e-6).
 
 Environment knobs: `NPFIXEDCOMPY_PROFILE=1` (per-phase timing, plus the
-`solvegrad` evaluation count), `NPFIC_REFINE_STEPS` (experimental: caps
-the per-candidate refinement steps inside `brmin`/`dfmin`; default `-1`
-= unlimited = shipped behaviour — see section 5), and, for OpenMP
-builds, `OMP_NUM_THREADS` (sizes the Eigen pool; see above for the
-effect on results).
+`solvegrad` evaluation count and the fresh-column count/time),
+`NPFIC_REFINE_STEPS` (experimental: caps the per-candidate refinement
+steps inside `brmin`/`dfmin`; default `-1` = unlimited = shipped
+behaviour — see section 5), and, for OpenMP builds,
+`OMP_NUM_THREADS` (sizes the Eigen pool; see above for the effect on
+results). (The `NPFIC_WARM` knob documented in section 4b was REMOVED in
+0.2.3 — its `=2` CNM re-verification arm is now the always-on engine
+behaviour, section 4c.)
 
 ## 3. The kernel column cache
 
@@ -186,57 +208,65 @@ Py: median of 5 (`tests/perf_baseline.py` / `tests/bench_binned.py`);
 R: best of 3 (`tests/bench_r.R` / `tests/bench_binned_r.R`), R 4.6.1 +
 RcppEigen 3.4.0 compiled by R's default MSVC flags (SSE2 baseline).
 
+(Py numbers are the 0.2.3 build, re-measured with the same scripts; the
+0.2.2 column is shown for the cases the 0.2.3 relaxation (§4c) moved
+most. R numbers are unchanged.)
+
 Un-binned:
 
-| case | `npfixedcomppy` | R | speedup |
-|------|-----------------|---|---------|
-| `npnormll`, n=1000 | 10.7 ms | 19 ms | 1.8× |
-| `npnormcvm`, n=1000 | 34.6 ms | — | — |
-| `npnormad`, n=1000 | 35.5 ms | 59 ms | 1.7× |
-| `npnormcll`, n=1000 | 1009 ms | 1924 ms | 1.9× |
-| `nppoisll`, n=1000 | 0.57 ms | 5 ms | 8.8× |
-| `nptll` β=∞, n=1000 | 36.2 ms | 211 ms | 5.8× |
-| `npnormll`, n=5000 | 27.2 ms | — | — |
-| `nptll` β=5, n=5000 | 2.95 s | 49.7 s | **16.8×** |
-| `npnormll`, n=50000 | 326 ms | — | — |
-| `estpi0` (norm), n=1000 | 24.9 ms | 97 ms | 3.9× |
+| case | `npfixedcomppy` (0.2.3) | 0.2.2 | R | speedup |
+|------|-------------------------|-------|---|---------|
+| `npnormll`, n=1000 | 5.5 ms | 10.7 | 19 ms | 3.5× |
+| `npnormcvm`, n=1000 | 32.9 ms | 34.6 | — | — |
+| `npnormad`, n=1000 | 36.8 ms | 35.5 | 59 ms | 1.6× |
+| `npnormcll`, n=1000 | 1269 ms | 1009 | 1924 ms | 1.5× |
+| `nppoisll`, n=1000 | 0.45 ms | 0.57 | 5 ms | 11× |
+| `nptll` β=∞, n=1000 | 17.5 ms | 36.2 | 211 ms | 12× |
+| `npnormll`, n=5000 | 19.4 ms | 27.2 | — | — |
+| `nptll` β=5, n=5000 | **857 ms** | 2.95 s | 49.7 s | **58×** |
+| `npnormll`, n=50000 | 215 ms | 326 | — | — |
+| `estpi0` (norm), n=1000 | 14.3 ms | 24.9 | 97 ms | 6.8× |
 
 Binned (`order = -3`):
 
-| case | `npfixedcomppy` | R | ratio |
-|------|-----------------|---|-------|
-| `npnormllw`, n=5000 | 37.1 ms | 120 ms | **3.2×** |
-| `npnormcvmw`, n=5000 | 118.7 ms | 110 ms | 0.9× |
-| `npnormadw`, n=5000 | 386.7 ms | 170 ms | 0.4× * |
-| `nptllw` β=∞, n=5000 | 206.1 ms | 1970 ms | **9.6×** |
-| `nptllw` β=5, n=5000 | 2.01 s | 29.3 s | **14.6×** |
-| `estpi0` (`npnormllw`), n=5000 | 83.8 ms | 1330 ms | **15.9×** |
-| `npnormllw`, n=20000 | 157.5 ms | 540 ms | **3.4×** |
-| `nptllw` β=∞, n=20000 | 779.4 ms | 7250 ms | **9.3×** |
-| `nptllw` β=5, n=20000 | 2293.6 ms | (minutes; not recorded) | — |
+| case | `npfixedcomppy` (0.2.3) | 0.2.2 | R | ratio |
+|------|-------------------------|-------|---|-------|
+| `npnormllw`, n=5000 | 27.9 ms | 37.1 | 120 ms | **4.3×** |
+| `npnormcvmw`, n=5000 | 152.8 ms | 118.7 | 110 ms | 0.8× |
+| `npnormadw`, n=5000 | 240.4 ms | 386.7 | 170 ms | 0.7× * |
+| `nptllw` β=∞, n=5000 | 112.1 ms | 206.1 | 1970 ms | **17.6×** |
+| `nptllw` β=5, n=5000 | 559.6 ms | 2.01 s | 29.3 s | **52×** |
+| `estpi0` (`npnormllw`), n=5000 | 53.4 ms | 83.8 | 1330 ms | **25×** |
+| `npnormllw`, n=20000 | 65.4 ms | 157.5 | 540 ms | **8.3×** |
+| `nptllw` β=∞, n=20000 | 213.2 ms | 779.4 | 7250 ms | **34×** |
+| `nptllw` β=5, n=20000 | 985.2 ms | 2293.6 | (minutes; not recorded) | — |
 
 \* `npnormadw` fits are run-to-run non-deterministic in both
 implementations (R wanders 6 basins, `ll` 0.17697…0.18252, over 13
 runs), so this ratio is indicative, not structural — a slower basin on
 the Py side inflates it.
 
-Reading: the big wins remain the t-family (un-binned β=5, 16.8×;
-binned, 9–15×), where the AS-243 kernel cache and the cheap
-CDF-difference binned fill dominate R's per-point re-evaluation. The
-binned normal families now *split*: `npnormllw` is ~3× faster than R —
-the grid-fill memo (section 3) serves the per-iteration grid sweep from
-the precomputed grid fill, while R refills the trapezoid at every
-candidate point; `npnormcvmw` is at parity (≈ 119 ms vs 110 ms, its
-support sets churn enough that most fills miss the memo); `npnormadw`
-still trails R (387 ms vs 170 ms) for the same reason plus its
-aggressive `collapse` re-weighting. Where a binned fit *does* pay for a
-fresh trapezoid fill, both sides fill the same matrix with the same
-bit-exact accumulation and both call the scalar libm `exp` — neither
-Eigen 5.0.0 nor R's RcppEigen 3.4.0 ships a double-precision SIMD
-`pexp` for x86 (grep-verified in both packet headers) — so a fresh fill
-is `exp`-bound on both sides and no wider instruction set can touch it;
-the remaining binned gap is *how often* each side refills, and the memo
-closes it for the LL-style sweep.
+Reading: the 0.2.3 support-search relaxation (§4c) widens the t-family
+lead to 58× (un-binned β=5) and 17–52× (binned) — the relaxed interval
+refinement cuts the fresh off-grid `dnt` columns 455 → 61 at n=5000.
+The un-binned normal families gain 1.3–2× (the `fl` cache and the
+zero-cost grid acceptance). The binned normal families still *split*:
+`npnormllw` is now 4–8× faster than R (28 ms vs 120 ms at n=5000;
+65 ms vs 540 ms at n=20000) — the grid-fill memo (section 3) serves
+the per-iteration grid sweep from the precomputed grid fill, and the
+relaxation shrinks the off-grid candidate work further; `npnormadw`
+narrows to ~0.7× (240 ms vs 170 ms, 36 → 17 outer iterations) but
+still trails, for the same memo-churn reason plus its aggressive
+`collapse` re-weighting; `npnormcvmw` is ~0.8× (153 ms vs 110 ms) —
+the relaxation visits a slightly slower basin (its `ll` stays within
+R's band, §4c). Where a binned fit *does* pay for a fresh trapezoid
+fill, both sides fill the same matrix with the same bit-exact
+accumulation and both call the scalar libm `exp` — neither Eigen 5.0.0
+nor R's RcppEigen 3.4.0 ships a double-precision SIMD `pexp` for x86
+(grep-verified in both packet headers) — so a fresh fill is `exp`-bound
+on both sides and no wider instruction set can touch it; the remaining
+binned gap is *how often* each side refills, and the memo closes it for
+the LL-style sweep.
 
 ### 4a. The `npnorm2Dll` (2-D) exception
 
@@ -473,6 +503,149 @@ for n = 2 (it is the only caller of the full gradient pair):
   Cholesky-based kernel — the bit-exact 0.2.1 trajectory — at the old
   cost.
 
+### 4b. Support-point hot start (the `NPFIC_WARM` experiment; the knob
+was removed in 0.2.3 — see §4c)
+
+The grid is fixed for the solver's life, so every outer iteration
+searches the same sign-change intervals (d1) / triples (d0) with a
+*slightly* different gradient. `NPFIC_WARM` exploits that: the
+PREVIOUS call's refined root for an interval (indexed stably by grid
+position) is reused in the NEXT call. Two arms were measured
+(`tests/bench_warm_ab.py`, n=5000 per case, `order=-3`, identical
+data/initial mix/grid/tol, median of 5):
+
+* **`NPFIC_WARM=1` — seed (quality-preserving).** The previous root is
+  passed as the *first interior point* of `brmin`/`dfmin`; the search
+  still converges to the true root of the NEW gradient, so the support
+  set found is unchanged — only the kernel-column evaluation count
+  drops (a seed near the root shrinks the bracket for Brent and
+  replaces the first parabolic step of `dfmin`). Measured:
+
+  | case | shipped (0) | seed (1) | speedup | Δll | max rel. |Δdens| |
+  |---|---|---|---|---|---|
+  | `nptll` β=5, n=5000 | 2957 ms (18 it, 2290 evals, 455 fresh) | 2736 ms (2274, 416) | 1.08× | −1.0e-10 | 4.9e-09 |
+  | `nptllw` β=5, n=5000 | 1505 ms (12 it, 1524, 300) | 1407 ms (1515, 274) | 1.07× | +4.6e-09 | 8.4e-08 |
+  | `npnormcll` β=1000, n=5000 | 3221 ms (61 it, 20678, 15326) | 2622 ms (59, 18468, 12407) | 1.23× | +5.2e-06 | 9.2e-06 |
+  | `npnormll` β=1, n=5000 | 23.3 ms (11 it, 1428, 297) | 20.7 ms (1396, 265) | 1.12× | +7.3e-12 | 1.1e-10 |
+  | `npnormad` β=1, n=5000 | 276 ms (18 it, 2395, 201) | 263 ms (2341, 198) | 1.05× | −6.4e-12 | 2.7e-09 |
+  | `nppoisll`, n=5000 | 2.0 ms (28 it, 3101, 0) | 1.8 ms (3085, 0) | 1.09× | −1.5e-11 | 1.7e-10 |
+
+  (`evals, freshcols` in parentheses.) The ll agreement is at the
+  outer-loop `tol` scale (1e-6) by construction — both arms solve the
+  same problem to the same tolerance; on five of the six cases it is
+  in fact bit-identical to ~1e-9. Gains track exactly the fresh-column
+  work the seed saves: largest where the `d0`/NNLS-heavy cases refine
+  many candidates (`npnormcll` 1.23×), negligible where the search is
+  already cheap (`npnormad` 1.05×, `nppoisll` — no kernel columns at
+  all — 1.09× on iteration count only).
+* **`NPFIC_WARM=2` — aggressive (CNM working-set re-verification; A/B
+  reference only).** The previous root is re-verified with ONE
+  gradient-value evaluation and accepted when still negative,
+  skipping the search entirely — the column-generation working-set
+  hot-start of the CNM scheme (Wang 2007, *Statistical Modelling*;
+  Wang & Taylor 2013, *J. Comput. Graph. Statist.*). Measured up to
+  2.39× (`npnormcll` 3221 → 1346 ms, 61 → 39 iterations) but the
+  quality is not preserved where the support roots drift between
+  outer iterations: `npnormll` lands on a worse optimum
+  (ll +4.16e-2, mixture density off by rel. 4.9e-3) and `npnormad`
+  by +1.7e-3, while on `nptllw` it even *lost* time (0.83× — the
+  accepted stale roots changed the weight trajectory and added
+  iterations). It violates the package's "the estimate's ll must not
+  be worse than the historical (shipped) result" acceptance rule, so
+  it is kept as an experimental arm, not a default.
+* **0.2.3: the knob was removed — the `=2` arm's behaviour is always
+  on.** Under the relaxed acceptance contract (density parity within
+  tolerance; the estimated `ll` not worse than the historical version;
+  a similar — not R-trajectory-matching — optimum), the quality
+  objection that kept `=2` experimental (a slightly different local
+  optimum where the support roots drift) no longer blocks it. The 0.2.3
+  engine makes the whole support-search relaxation (§4c — CNM
+  re-verification plus zero-cost negative-grid acceptance plus
+  negative-gain early stop) the default, and all ten parity suites
+  report `TOTAL BAD: 0` on the re-recorded trajectory. The A/B tables
+  above are historical — recorded on the 0.2.2 build where the knob
+  existed (`tests/bench_warm_ab.py` still runs, but every arm now
+  behaves identically, the environment variable is no longer read).
+
+### 4c. 0.2.3 — the relaxed support search (always on; measured)
+
+The 0.2.2 engine searched for the *exact* minimum of the gain inside
+every sign-change interval (d1) / triple (d0). 0.2.3 makes three
+relaxations that exploit the fact the search only ever needs to *find a
+negative point* — the caller's sign filter accepts any of them:
+
+1. **Zero-cost negative-grid acceptance.** The grid sweep already
+   evaluates the gain at every grid point (free, from the cached grid
+   kernel). If an interval endpoint — or a triple's middle grid point —
+   already has a negative gain, that grid point is a valid new support
+   point at **zero additional evaluations**; the interval's warm root is
+   kept for a later call. Before 0.2.3 every such interval still ran the
+   full refinement.
+2. **CNM working-set re-verification (the old `NPFIC_WARM=2` arm).**
+   For the remaining intervals, the previous call's refined root is
+   re-verified with **one** gradient evaluation and accepted when still
+   negative — skipping the refinement entirely.
+3. **Negative-gain early stop inside `brmin`/`dfmin`.** The refinements
+   now return as soon as *any* evaluated point has negative gain (the
+   `d1` check piggybacks on the same kernel column the refinement
+   evaluates; the `d0` check is the parabolic point itself).
+
+Each accepted point is still a *valid* new support point (negative
+gain ⇒ the outer iteration decreases the loss), and the `Npmix` result
+gains a **`grid_gain`** field — the minimum gain over *all* grid points
+at the final estimate — so the certificate is exposed, not hidden:
+`min_gradient` (support directions) plus `grid_gain` (grid directions)
+together certify no negative direction inside the grid; `grid_gain` is
+grid-resolution-dependent and can legitimately be slightly negative
+(measured −8.2e-4 on `npnormcvm`, −2.8e-3 on `npnormadw`), so the
+acceptance gate is `min_gradient ≥ -1e-4` with `grid_gain` reported for
+information.
+
+**Wall-time effect (same data / init / grid / tol, median of 5):**
+
+| case | 0.2.2 | 0.2.3 | speedup | iters |
+|------|-------|-------|---------|-------|
+| `nptll` β=5, n=5000 | 2957 ms (engine 2334) | **857 ms** (engine 266) | **3.5×** | 31 → 11 |
+| `nptll` β=∞, n=5000 | 130 ms | 81 ms (engine 21) | 1.6× | 15 → 18 |
+| `nptllw` β=∞, n=5000 | 206 ms | 112 ms | 1.8× | 15 → 18 |
+| `nptllw` β=5, n=5000 | 2.01 s | **559 ms** | **3.6×** | 12 → 11 |
+| `nppoisll`, n=5000 | 2.0 ms | 0.54 ms | 3.7× | — |
+| `npnormll`, n=1000 | 10.7 ms | 5.5 ms | 1.9× | — |
+| `npnormllw`, n=5000 | 37.1 ms | 27.9 ms | 1.3× | 15 → 18 |
+| `npnormadw`, n=5000 | 387 ms | 240 ms | 1.6× | 36 → 17 |
+| `npnormcll`, n=1000 | 1009 ms | **1269 ms** | **0.8×** | 19 → 31 |
+
+The gradient-evaluation drop at n=5000, n=1000: `nptll` β=5
+3733 → 1191 evals, 455 → 61 fresh columns (§1); `npnormcll`
+21043 → 24425 evals (the opposite direction — see below).
+
+**Quality effect (documented, verified in the parity gates):**
+
+* Most families land at a **better or equal** ll: the t-family and
+  un-binned normal `ll`s agree with 0.2.2 to ~1e-6 (the outer `tol`
+  scale) or better; the binned families agree with R within their
+  existing BAND (R is non-deterministic on
+  `npnormcvmw`/`npnormadw`). The one documented exception is
+  `npnormcll` (its flat correlation landscape has 6e-5-scale basins, so
+  basin choice is not identified by the tolerance): 0.2.3's fit is
+  4.8e-6 (relative) better than the 0.2.2 fit but 5.5e-5 *worse* than
+  R's from-scratch optimum (ll −60.20387 vs −60.20717, 107 vs 92
+  support points) — a different valid optimum, gated on
+  `min_gradient ≥ -1e-4` (no negative direction) plus the
+  recorded-trajectory GOLD (`tests/verify_cvmadcll.py`).
+* The trade: the relaxation accepts *any* negative point, so on
+  landscapes with flat, nearly-equal basins it can settle on a
+  **different valid optimum** than the exact-minimum search —
+  `npnormcvm` lands 8.4e-6 above R's observed band (R itself wanders
+  1.5e-5 across runs), `npnormcll` visits a 107-point support set (vs
+  92) with 31 outer iterations, which is why it is the one family
+  where 0.2.3 is *slower* (0.8×). All ten parity suites report
+  `TOTAL BAD: 0` on the re-recorded deterministic trajectory.
+* `estpi0` (target-statistic bisection) is unaffected in spirit: its
+  final mixture is not a free optimum (it pins the point-mass weight to
+  hit the threshold), so the KKT certificate does not apply to it; the
+  parity gates check its statistic hit, not `min_gradient`.
+
 ## 5. What was *not* done, and why
 
 * **Capping the per-candidate refinement (`NPFIC_REFINE_STEPS`) —
@@ -503,7 +676,10 @@ for n = 2 (it is the only caller of the full gradient pair):
   The default stays `-1` (unlimited); the knob is kept for further
   experiments, and the `NPFIXEDCOMPY_PROFILE` line now reports the
   `solvegrad` evaluation count (`evals=`) so such experiments are
-  measurable.
+  measurable. (The table was recorded on the 0.2.2 exact-minimum
+  search; under the 0.2.3 relaxed search (§4c) the refinement is
+  usually skipped or cut short, so the cap rarely binds — the knob
+  remains, but its effect is now secondary to the relaxation.)
 * **Hand-written OpenMP** — stripped entirely (see section 2); it was a
   crash/determinism hazard and the gains are re-obtained bit-safely by
   the cache.
@@ -530,6 +706,7 @@ cd npfixedcomppy
 .venv\Scripts\python.exe tests\reprofile_phases.py     :: re-measure the section-1 phase table
 .venv\Scripts\python.exe tests\refine_ab.py            :: NPFIC_REFINE_STEPS A/B (wall/iters/ll)
 .venv\Scripts\python.exe tests\refine_ab_evals.py      :: same A/B, evals from the PROFILE line
+.venv\Scripts\python.exe tests\bench_warm_ab.py        :: historical NPFIC_WARM A/B (§4b; 0.2.3: all arms identical)
 set NPFIXEDCOMPY_PROFILE=1
 .venv\Scripts\python.exe -c "import numpy as np, npfixedcomppy as n; x=np.random.default_rng(3).normal(0,1,5000); n.computemixdist(x, method='nptll', beta=5)"
 :: per-phase timing line (n=5000, nptll beta=5, with evals=) to stderr

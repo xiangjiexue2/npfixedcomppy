@@ -92,6 +92,12 @@ class Npmix:
         The minimum of the gradient of the loss with respect to a new
         support point, evaluated at the final support points. At
         convergence this is ``<= 0``.
+    grid_gain : float
+        The minimum gain (gradient of the loss w.r.t. a new support point)
+        over all GRID points at the final estimate — the grid-level
+        certificate. A negative value would indicate a direction outside
+        both the support and the grid (non-convex loss); the support
+        certificate above stays the strict KKT number.
     ll : float
         The loss at the estimate — negative log-likelihood for the
         maximum-likelihood families, the chosen distance for the
@@ -119,6 +125,7 @@ class Npmix:
     beta: float = 1.0
     family: str = "npnorm"
     min_gradient: float = 0.0
+    grid_gain: float = float("nan")
     ll: float = 0.0
     flag: str = "d0"
     iter: int = 0
@@ -1067,6 +1074,7 @@ def _to_npmix(res) -> Npmix:
         beta=float(res["beta"]),
         family=str(res["family"]),
         min_gradient=float(res["min_gradient"]),
+        grid_gain=float(res.get("grid_gain", float("nan"))),
         ll=float(res["ll"]),
         flag=str(res["flag"]),
         iter=int(res["iter"]),

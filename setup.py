@@ -200,7 +200,7 @@ ext = Extension(
 
 setup(
     name="npfixedcomppy",
-    version="0.2.1",
+    version="0.2.3",
     description=(
         "Non-parametric estimation of mixing distributions with fixed "
         "components (C++/Eigen + pybind11 port of the R package npfixedcomp2)"

@@ -51,6 +51,7 @@ py::dict result_to_dict(const MixResult& r) {
     d["beta"] = r.beta;
     d["family"] = r.family;
     d["min_gradient"] = r.min_gradient;
+    d["grid_gain"] = r.grid_gain;
     d["ll"] = r.ll;
     d["flag"] = r.flag;
     d["iter"] = r.iter;
@@ -1057,6 +1058,7 @@ py::dict npnorm2dll(py::array_t<double> data, py::array_t<double> mu0fixed,
     d["beta"] = betalist;
     d["family"] = a.family;
     d["min_gradient"] = a.min_gradient;
+    d["grid_gain"] = a.grid_gain;
     d["ll"] = a.ll;
     d["flag"] = a.flag;
     d["iter"] = static_cast<long>(a.iter);
@@ -1131,7 +1133,7 @@ PYBIND11_MODULE(_core, m) {
     m.doc() = "npfixedcomppy C++/Eigen core (pybind11)";
     // A callable, matching the PyO3 `version()` entry point the Python
     // front-end (npfc.py) expects.
-    m.def("version", [] { return std::string("0.2.1"); });
+    m.def("version", [] { return std::string("0.2.3"); });
 
     const auto guard = py::call_guard<py::gil_scoped_release>();
     const auto kw = py::kw_only();

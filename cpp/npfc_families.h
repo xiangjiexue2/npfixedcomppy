@@ -527,6 +527,9 @@ public:
     const char* family_name() const override { return "npnorm"; }
     const char* flag() const override { return "d1"; }
     double beta_value() const override { return beta_; }
+    std::pair<std::size_t, double> kernel_fresh() const override {
+        return {kc_.fresh_count(), kc_.fresh_ms()};
+    }
 
 private:
     double sum_pi0fixed() const {
@@ -776,6 +779,9 @@ public:
     const char* family_name() const override { return "npt"; }
     const char* flag() const override { return "d0"; }
     double beta_value() const override { return beta_; }
+    std::pair<std::size_t, double> kernel_fresh() const override {
+        return {kc_.fresh_count(), kc_.fresh_ms()};
+    }
 
 private:
     double sum_pi0fixed() const {
@@ -983,6 +989,9 @@ public:
     const char* family_name() const override { return "npnorm"; }
     const char* flag() const override { return "d1"; }
     double beta_value() const override { return beta_; }
+    std::pair<std::size_t, double> kernel_fresh() const override {
+        return {kc_.fresh_count(), kc_.fresh_ms()};
+    }
 
 private:
     // CVM precompute: the empirical midpoints `(i + 0.5)/n` minus the
@@ -1251,6 +1260,9 @@ public:
     const char* family_name() const override { return "npnorm"; }
     const char* flag() const override { return "d1"; }
     double beta_value() const override { return beta_; }
+    std::pair<std::size_t, double> kernel_fresh() const override {
+        return {kc_.fresh_count(), kc_.fresh_ms()};
+    }
 
 private:
     void recompute_pre() {
@@ -1459,6 +1471,9 @@ public:
     const char* family_name() const override { return "npnormc"; }
     const char* flag() const override { return "d0"; }
     double beta_value() const override { return beta_; }
+    std::pair<std::size_t, double> kernel_fresh() const override {
+        return {kc_.fresh_count(), kc_.fresh_ms()};
+    }
 
 private:
     double sum_pi0fixed() const {
@@ -2701,6 +2716,9 @@ public:
     const char* family_name() const override { return "npt"; }
     const char* flag() const override { return "d0"; }
     double beta_value() const override { return beta_; }
+    std::pair<std::size_t, double> kernel_fresh() const override {
+        return {kc_.fresh_count(), kc_.fresh_ms()};
+    }
 
 private:
     double sum_pi0fixed() const {

@@ -35,17 +35,18 @@ CASES = [
     ("npnormad n=1000", "computemixdist(d1, method='npnormad')"),
 ]
 
-# C++ prints:
-#   PROFILE iters=31 total=2379.0ms  solvegrad=2119.6  mapping=0.3  loss=0.8
-#             weights=8.9  collapse=249.5 evals=12345 (ms)
+# C++ prints (see the fprintf in npfc_engine.h; note the single space
+# after the solvegrad value):
+#   PROFILE iters=11 total=267.3ms  solvegrad=183.5 mapping=0.1  loss=0.3
+#             weights=3.3  collapse=80.1 evals=1191 freshcols=61 freshms=255.2 (ms)
 PAT = re.compile(
-    r"PROFILE iters=(\d+) total=([\d.]+)ms  solvegrad=([\d.]+)  "
+    r"PROFILE iters=(\d+) total=([\d.]+)ms  solvegrad=([\d.]+) "
     r"mapping=([\d.]+)  loss=([\d.]+)  weights=([\d.]+)  collapse=([\d.]+) "
-    r"evals=(\d+) \(ms\)")
+    r"evals=(\d+) freshcols=(\d+) freshms=([\d.]+) \(ms\)")
 
 print(f"{'case':20s} {'iters':>5s} {'total':>8s} {'solvegrad':>9s} "
       f"{'mapping':>7s} {'loss':>6s} {'weights':>7s} {'collapse':>8s} "
-      f"{'evals':>7s}")
+      f"{'evals':>7s} {'freshcol':>8s} {'freshms':>8s}")
 for name, snippet in CASES:
     rows = []
     for _ in range(3):
@@ -63,7 +64,7 @@ for name, snippet in CASES:
             print(proc.stderr[-2000:], file=sys.stderr)
             sys.exit(1)
         rows.append(tuple(float(v) for v in m.groups()))
-    med = [median(r[i] for r in rows) for i in range(8)]
+    med = [median(r[i] for r in rows) for i in range(10)]
     print(f"{name:20s} {med[0]:5.0f} {med[1]:8.1f} {med[2]:9.1f} "
           f"{med[3]:7.1f} {med[4]:6.1f} {med[5]:7.1f} {med[6]:8.1f} "
-          f"{med[7]:7.0f}")
+          f"{med[7]:7.0f} {med[8]:8.0f} {med[9]:8.1f}")

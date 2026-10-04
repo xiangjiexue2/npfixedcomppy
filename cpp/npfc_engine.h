@@ -175,6 +175,14 @@ public:
     virtual const char* family_name() const = 0;
     virtual const char* flag() const = 0;
     virtual double beta_value() const = 0;
+
+    // Diagnostics: the (number, wall ms) of kernel columns this family had
+    // to EVALUATE during the run (fresh, i.e. not already cached) — the
+    // `NPFIXEDCOMPY_PROFILE=1` line reports it. Zero for families without a
+    // column cache.
+    virtual std::pair<std::size_t, double> kernel_fresh() const {
+        return {0, 0.0};
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -284,6 +292,9 @@ struct MixResult {
     double beta = 0.0;
     std::string family;
     double min_gradient = 0.0;
+    // Minimum gain at the GRID points (grid-level certificate; see
+    // `finish`). NaN when never computed.
+    double grid_gain = std::numeric_limits<double>::quiet_NaN();
     double ll = 0.0;
     std::string flag;
     long iter = 0;
@@ -315,8 +326,22 @@ public:
         // loop then needs more iterations to converge).
         if (const char* e = std::getenv("NPFIC_REFINE_STEPS"))
             refine_steps_ = std::atol(e);
+        // Support-point hot start (always on): the grid is fixed for the
+        // solver's life, so each sign-change interval (d1) / triple (d0)
+        // has a stable index. The PREVIOUS call's refined root for an
+        // interval is re-verified against the NEW gradient with ONE
+        // gradient-value evaluation and accepted when still negative,
+        // skipping the exact `brmin`/`dfmin` search — the CNM working-set
+        // re-verification (column-generation hot start; Wang 2007, Stat.
+        // Modelling; Wang & Taylor 2013, JCGS). Measured A/B (docs/PERF.md
+        // §4b): 1.03–2.39× faster; on families whose support roots drift
+        // between iterations (e.g. npnormll/npnormad) it can land on a
+        // slightly different local optimum — the goldens in tests/ are
+        // recorded on this trajectory.
         // sort gridpoints (R does sort(gridpoints) before calling the C++ fn)
         std::sort(gridpoints_.begin(), gridpoints_.end(), f64_less);
+        warm_root_d1_.assign(gridpoints_.size(), f64_nan());
+        warm_root_d0_.assign(gridpoints_.size(), f64_nan());
         set_precompute();
         fam_->prepare(gridpoints_);
     }
@@ -327,6 +352,10 @@ public:
 
     // `Brmin`: improved Brent's method for the gradient's d1 (derivative
     // available), called on a sign-change interval. Port of `Brmin`.
+    // Stops early as soon as any evaluated point has a NEGATIVE gain
+    // (a0 < 0): that point is already a valid new support point — the
+    // exact minimum of the gain is not needed (the caller's sign filter
+    // accepts any negative point).
     double brmin(double lb, double ub, const std::vector<double>& dens,
                  SolveCtx& ctx, double tol) const {
         double _duma, fa;
@@ -344,9 +373,13 @@ public:
                (refine_steps_ < 0 || guard < refine_steps_)) {
             guard++;
             c = (a + b) / 2.0;
-            double _dumc, fcc;
+            double a0c, fcc;
             ++grad_evals_;
-            fam_->gradfun(c, dens, ctx, false, true, _dumc, fcc);
+            fam_->gradfun(c, dens, ctx, true, true, a0c, fcc);
+            // Negative-gain early stop (a0 is piggybacked on the same
+            // kernel column the d1 part needs).
+            if (a0c < 0.0)
+                return c;
             fc = fcc;
             if (fa != fc && fb != fc) {
                 s = a * fb * fc / (fa - fb) / (fa - fc) +
@@ -356,9 +389,11 @@ public:
                 s = b - fb * (b - a) / (fb - fa);
             }
             if (s > a && s < b) {
-                double _dums, fss;
+                double a0s, fss;
                 ++grad_evals_;
-                fam_->gradfun(s, dens, ctx, false, true, _dums, fss);
+                fam_->gradfun(s, dens, ctx, true, true, a0s, fss);
+                if (a0s < 0.0)
+                    return s;
                 fs = fss;
             } else {
                 s = c;
@@ -388,7 +423,10 @@ public:
     }
 
     // `Dfmin`: derivative-free minimum via successive parabolic
-    // interpolation. Port of `Dfmin`.
+    // interpolation. Port of `Dfmin`. Stops early as soon as any
+    // evaluated point has a NEGATIVE gain (a0 < 0): that point is
+    // already a valid new support point (the function returns NaN when
+    // it exhausts the search without finding one, as before).
     double dfmin(const std::array<double, 3>& x1, const std::array<double, 3>& fx1,
                  const std::vector<double>& dens, SolveCtx& ctx, double tol) const {
         // C++: `lb`/`ub` are taken from the ORIGINAL endpoints before the
@@ -420,6 +458,9 @@ public:
             double fnewpoint, _dum;
             ++grad_evals_;
             fam_->gradfun(newpoint, dens, ctx, true, false, fnewpoint, _dum);
+            // Negative-gain early stop (a0 is what is evaluated here).
+            if (fnewpoint < 0.0)
+                return newpoint;
             if (fnewpoint > fxx[2]) {
                 if (newpoint > xx[2]) {
                     ub = newpoint;
@@ -477,16 +518,46 @@ public:
         SolveCtx ctx;
         ctx.dens = &dens;
         std::vector<double> pv, pg;
+        // `pv` (the gains at the grid) is gained for free on the cached
+        // grid kernel (the d1 part needs the same columns); it feeds the
+        // zero-cost endpoint acceptance below.
         grad_evals_ += static_cast<long>(gp.size());
-        fam_->gradfunvec(gp, dens, ctx, false, true, pv, pg);
+        fam_->gradfunvec(gp, dens, ctx, true, true, pv, pg);
         std::vector<int> idx;
         for (int i = 0; i < l - 1; ++i)
             if (pg[i] < 0.0 && pg[i + 1] > 0.0)
                 idx.push_back(i);
         std::vector<double> ans;
         ans.reserve(idx.size());
-        for (int i : idx)
-            ans.push_back(brmin(gp[i], gp[i + 1], dens, ctx, tol));
+        for (int i : idx) {
+            // Cheapest first: an endpoint whose gain is already negative
+            // (from the sweep's free `pv`) is a valid support point at
+            // zero cost — no search, and the interval's warm root is
+            // KEPT (it may still verify in a later call).
+            double root = f64_nan();
+            if (pv[i] < 0.0) {
+                root = gp[i];
+            } else if (pv[i + 1] < 0.0) {
+                root = gp[i + 1];
+            } else {
+                // CNM working-set re-verification: re-verify the PREVIOUS
+                // call's refined root for this interval with ONE
+                // gradient-value evaluation. Still negative => a valid
+                // new support point; no `brmin` needed.
+                const double r = warm_root_d1_[i];
+                if (!f64_isnan(r) && r > gp[i] && r < gp[i + 1]) {
+                    double v, _s;
+                    ++grad_evals_;
+                    fam_->gradfun(r, dens, ctx, true, false, v, _s);
+                    if (v < 0.0)
+                        root = r;
+                }
+                if (f64_isnan(root))
+                    root = brmin(gp[i], gp[i + 1], dens, ctx, tol);
+                warm_root_d1_[i] = root;
+            }
+            ans.push_back(root);
+        }
         if (!ans.empty()) {
             std::vector<double> vals, g2;
             grad_evals_ += static_cast<long>(ans.size());
@@ -528,9 +599,32 @@ public:
         std::vector<double> ans;
         for (int j = 0; j < l - 2; ++j) {
             if ((pv[j + 1] - pv[j]) < 0.0 && (pv[j + 2] - pv[j + 1]) > 0.0) {
-                const double r = dfmin({gp[j], gp[j + 1], gp[j + 2]},
-                                       {pv[j], pv[j + 1], pv[j + 2]}, dens, ctx,
-                                       tol);
+                // Cheapest first: the trigger makes `pv[j+1]` the triple's
+                // discrete minimum; if it is already negative, `gp[j+1]`
+                // is a valid support point at zero cost (no `dfmin`). The
+                // triple's warm root is KEPT (see `solvegradd1`).
+                double r = f64_nan();
+                if (pv[j + 1] < 0.0) {
+                    r = gp[j + 1];
+                } else {
+                    // CNM working-set re-verification: the previous call's
+                    // refined root for this triple, verified with ONE
+                    // gradient-value evaluation. `dfmin` is the expensive
+                    // path (fresh kernel-column evaluations); a verified
+                    // root skips it entirely.
+                    const double rw = warm_root_d0_[j];
+                    if (!f64_isnan(rw) && rw > gp[j] && rw < gp[j + 2]) {
+                        double v, _s;
+                        ++grad_evals_;
+                        fam_->gradfun(rw, dens, ctx, true, false, v, _s);
+                        if (v < 0.0)
+                            r = rw;
+                    }
+                    if (f64_isnan(r))
+                        r = dfmin({gp[j], gp[j + 1], gp[j + 2]},
+                                  {pv[j], pv[j + 1], pv[j + 2]}, dens, ctx, tol);
+                    warm_root_d0_[j] = r;
+                }
                 if (!f64_isnan(r))
                     ans.push_back(r);
             }
@@ -715,13 +809,14 @@ public:
             const double tot = std::chrono::duration<double>(
                                    std::chrono::steady_clock::now() - t_iter_start)
                                    .count();
+            const std::pair<std::size_t, double> kf = fam_->kernel_fresh();
             std::fprintf(stderr,
-                         "PROFILE iters=%ld total=%.1fms  solvegrad=%.1f  "
+                         "PROFILE iters=%ld total=%.1fms  solvegrad=%.1f "
                          "mapping=%.1f  loss=%.1f  weights=%.1f  collapse=%.1f "
-                         "evals=%ld (ms)\n",
+                         "evals=%ld freshcols=%zu freshms=%.1f (ms)\n",
                          iter_, tot * 1e3, pt_grad * 1e3, pt_map * 1e3,
                          pt_loss * 1e3, pt_wt * 1e3, pt_col * 1e3,
-                         grad_evals_);
+                         grad_evals_, kf.first, kf.second);
         }
         resultpt_ = std::move(mu0);
         resultpr_ = std::move(pi0);
@@ -948,12 +1043,25 @@ public:
         double min_gradient = std::numeric_limits<double>::infinity();
         for (double v : maxgrad)
             min_gradient = std::min(min_gradient, v);
+        // Grid-level certificate: the gains at the FINAL (possibly
+        // converged) dens across the whole grid. A negative one would
+        // mean a direction outside both the support AND the grid (the
+        // refined roots only certify sub-intervals), so it is tracked
+        // separately — the support-gradient `min_gradient` stays the
+        // strict KKT number.
+        std::vector<double> gg, _g3;
+        fam_->gradfunvec(gridpoints_, dens, fctx, true, false, gg, _g3);
+        double gmin = std::numeric_limits<double>::infinity();
+        for (double v : gg)
+            gmin = std::min(gmin, v);
+        grid_gain_ = gmin;
         MixResult r;
         r.pt = std::move(mu0new);
         r.pr = std::move(pi0new);
         r.beta = fam_->beta_value();
         r.family = fam_->family_name();
         r.min_gradient = min_gradient;
+        r.grid_gain = gmin;
         r.ll = fam_->lossfunction(dens) + fam_->extrafun();
         r.flag = fam_->flag();
         r.iter = iter_;
@@ -973,6 +1081,13 @@ private:
     std::vector<double> resultpt_, resultpr_;
     int verbose_;
     long refine_steps_ = -1;  // -1 = unlimited (the shipped behaviour)
+    // Previous-call refined roots (the always-on CNM working-set hot
+    // start; see the constructor), indexed by grid interval (d1:
+    // sign-change pair `i`; d0: triple `j`). NaN = no candidate yet.
+    // `mutable`: the search methods are const like the rest of the solver.
+    mutable std::vector<double> warm_root_d1_, warm_root_d0_;
+    // Grid-level certificate of the last `finish()` call (see there).
+    mutable double grid_gain_ = std::numeric_limits<double>::quiet_NaN();
     // Count of (mu, dens) gradient evaluations inside the loop (scalar
     // gradfun = 1 each, vectorised gradfunvec = one per point); the A/B
     // "less work per step" knob is read against this (PROFILE line only).
