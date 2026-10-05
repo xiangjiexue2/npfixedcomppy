@@ -268,6 +268,13 @@ Version sources bumped to `0.2.3` (`pyproject.toml` single source,
 1191 gradient evaluations / 61 fresh off-grid columns (vs 3733 / 455
 pre-relaxation) — see [`docs/PERF.md`](docs/PERF.md) §1.
 
+*Historical note: this section describes the 0.2.3 build; the current
+build is 0.3.0. The 0.2.3 1-D engine, goldens, and the numbers above
+carry over unchanged to 0.3.0, which only generalized the 2-D family to
+N-D (`npnormND`) and removed the `NPFIC_2D_EXACT` objective path (see
+"What's new in 0.3.0" above). The "ten parity suites" count is the
+0.2.3 set — `tests/verify_3d.py` joined it in 0.3.0, making eleven.*
+
 ### 0.3.0 更新内容（相对 0.2.3）
 
 **2-D 族 `npnorm2Dll` 泛化为 N 维——新族 `npnormND`——并移除 R 同款的
@@ -365,6 +372,12 @@ pre-relaxation) — see [`docs/PERF.md`](docs/PERF.md) §1.
 `freshcols=` / `freshms=`）；当前构建下 `nptll` β=5、n=5000 为 1191
 次梯度求值 / 61 个 fresh 离网格核列（放宽前为 3733 / 455）——见
 [`docs/PERF.md`](docs/PERF.md) §1。
+
+*历史注记：本节描述 0.2.3 构建；当前构建为 0.3.0。0.2.3 的一维引擎、
+金标与上文数字在 0.3.0 中不变地沿用，0.3.0 仅把 2-D 族泛化为 N-D
+（`npnormND`）并移除了 `NPFIC_2D_EXACT` 目标函数路径（见上文
+"0.3.0 更新内容"）。"10 个 parity 套件"是 0.2.3 时的集合——
+`tests/verify_3d.py` 在 0.3.0 加入后为 11 个。*
 
 ## 2. What's new in 0.2.2 (vs 0.2.1)
 
@@ -638,6 +651,13 @@ table):
 
 All ten parity suites report `TOTAL BAD: 0` on the current build.
 
+*Historical note: this section describes the 0.2.1 build; the current
+build is 0.3.0. The 2-D family introduced here was named
+`npnorm2Dll`; 0.3.0 generalized it to N dimensions as `npnormND`
+(keeping `npnorm2Dll` as the k = 2 alias) and removed the
+`NPFIC_2D_EXACT` objective path. The "ten parity suites" count is the
+0.2.1 set — `tests/verify_3d.py` joined it in 0.3.0, making eleven.*
+
 ### 0.2.1 更新内容（相对 0.2.0）
 
 **新增：二维族 `npnorm2Dll`** —— 双变量正态混合分布，经
@@ -778,6 +798,12 @@ n = 2 重新推导：
   `solvegrad` 的求值次数（`evals=`）。
 
 当前构建上全部 10 个 parity 套件报告 `TOTAL BAD: 0`。
+
+*历史注记：本节描述 0.2.1 构建；当前构建为 0.3.0。本节的 2-D 族当时
+名为 `npnorm2Dll`；0.3.0 把它泛化为 N 维的 `npnormND`（保留
+`npnorm2Dll` 为 k = 2 别名）并移除了 `NPFIC_2D_EXACT` 目标函数路径。
+"10 个 parity 套件"是 0.2.1 时的集合——`tests/verify_3d.py` 在 0.3.0
+加入后为 11 个。*
 
 ### What's new in 0.2.0 (vs 0.1.0)
 

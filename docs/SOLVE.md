@@ -32,7 +32,7 @@
 | Python 前端 | `python/npfixedcomppy/npfc.py` | R 兼容的薄封装：参数校验、分箱族的预分箱（`h = 10**order`，向下取整，同 R `bin`）、默认网格/初始分布、`Npmix` 结果对象 |
 | pybind11 绑定 | `cpp/npfc_py.cpp` | 每个族一个入口函数（`npnormll`、`nptll`、`npnormllw`、…），把 numpy 数组转 `std::vector`，构造 `MixSolver` + 族对象，调 `computemixdist` / `estpi0`，`finish()` 的结果转 dict |
 | 引擎 | `cpp/npfc_engine.h` | `MixSolver`：外层主循环、`solvegrad`（支撑点搜索）、`brmin`/`dfmin`、`collapse`、`estpi0`/`estpi0_fast`、`finish`；混合适用工具 `sortmix`/`simplifymix`/`collapsemix`；`Family` 虚接口定义 |
-| 一维族 | `cpp/npfc_families.h` | 11 个一维族的实现：`lossfunction`、`mapping`、`gradfun`/`gradfunvec`、`computeweights`、`prepare_solve`、`prepare`、per-solve 不变量缓存 |
+| 一维族 | `cpp/npfc_families.h` | 10 个一维族的实现：`lossfunction`、`mapping`、`gradfun`/`gradfunvec`、`computeweights`、`prepare_solve`、`prepare`、per-solve 不变量缓存 |
 | 多元正态族（N-D） | `cpp/npfc_famnd.h` | `npnormND`（R `npnorm2Dll` 的 N-D 泛化；k = 2 即 R 的双变量族，绑定名 `npnorm2Dll` 保留为别名）：自带一套外层循环（结构同上），权重子问题用 `LBFGSpp::LBFGSBSolver`（有界 LBFGS），核为 N-D 正态（k = 2 走手展开 2×2 Cholesky 快路径，k > 2 走 Eigen `LLT`；0.3.0 起无 R 同款 exact 路径） |
 | 核函数 | `cpp/npfc_kernels.h` | 各核（正态、非中心 t 的 AS-243 级数、Poisson、相关系数、分箱梯形填充）+ `KernelColumnCache`（按 `mu` 缓存整列核值） |
 | 网格/初始化 | `cpp/npfc_grid.h` | R `nspmix` 的移植：`whist` 直方图（diddle 规则）、`initial_npnorm`/`initial_nppois`（直方图式初始混合分布 + `disc` 排序归一）、`gridpoints_npnorm`（数据范围外扩 + 端点，默认 100 点）/`gridpoints_nppois`（sqrt 空间网格） |
@@ -354,7 +354,7 @@ d = `k` ≥ 2；绑定名 `npnorm2Dll` 保留为 d = 2 的别名）。结构同 
 | estpi0 / estpi0_fast | 同上（L829 / L944） |
 | 结果与证书 | 同上 `finish`（L1032） |
 | Family 接口 | 同上（L69） |
-| 族实现（正态/t/Poisson/CLL/AD/分箱） | `npfc_families.h`（`NpNormLL`/`NpTLL`/… 11 个类） |
+| 族实现（正态/t/Poisson/CLL/AD/分箱） | `npfc_families.h`（`NpNormLL`/`NpTLL`/… 10 个类） |
 | 多元正态族（N-D） | `npfc_famnd.h`（`NpNormND`；k = 2 即 R `npnorm2Dll`） |
 | 核 + 列缓存 | `npfc_kernels.h`（`KernelColumnCache` L57） |
 | NNLS / pnnlssum / pnnqp | `npfc_nnls.{h,cpp}` |
