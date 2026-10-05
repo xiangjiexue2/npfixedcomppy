@@ -30,32 +30,35 @@ Supported families (`method` argument):
 | `npnormcvmw` | normal (binned)  | Cramér–von Mises distance  | scale (default `1`)                    |
 | `npnormadw`  | normal (binned)  | Anderson–Darling distance  | scale (default `1`)                    |
 | `nptllw`     | t (binned)       | maximum likelihood         | degrees of freedom (default `inf`)     |
-| `npnorm2Dll` | bivariate normal | maximum likelihood (experimental) | covariance matrix (default `I₂`) |
+| `npnormND`   | multivariate normal (k ≥ 2) | maximum likelihood | covariance matrix (default `Iₖ`) |
+| `npnorm2Dll` | k = 2 alias of `npnormND` (R name) | maximum likelihood (experimental) | covariance matrix (default `I₂`) |
 
 The binned ("`...w`") variants pre-bin the observations onto the grid
 `h = 10^order` (default `order = -3`, i.e. `h = 10^-3`; round-down, as in
 R's `bin`) and fit the binned kernel; they are intended for large samples
 and take `order` as an extra argument (ignored by the un-binned families).
 
-`npnorm2Dll` takes an `(n, 2)` data matrix and fits a bivariate normal
-mixture (the structural parameter `beta` is the `2 x 2` covariance matrix,
-default the identity). It runs its own L-BFGS-B support-point search (the
-L-BFGS-B of yixuan/LBFGSpp, as in the R package) instead of the 1-D
-engine; the R package documents it as *experimental and possibly very
-slow*. On this build it is still the slowest family relative to R
-(n=300: ≈ 0.95 s vs ≈ 0.8 s, same data — the residual gap is the
-per-cell L-BFGS-B search machinery, after a hand-unrolled 2×2 density
-kernel, a 0-division explicit-inverse objective fast path, the
-per-cell hot start *and* the true directional derivative cut the old
-~28× gap to ~1.3×) — see
-[`docs/PERF.md`](docs/PERF.md). The per-cell objective has
-two paths: a fast path (default, ≈ 2.3× faster per evaluation on the
-reference run and ≈ 4.6× end-to-end on the second n=300 benchmark,
-results *similar* to the exact path — main components within ≈ 0.007
-and ll within ≈ 8e-5 on the reference run) and the R-identical
-bit-exact path, selectable with `NPFIC_2D_EXACT=1`; the kernels
-themselves remain bit-exact with R, and both paths land on a valid (in
-the reference run, actually slightly better than R's) local optimum.
+`npnormND` takes an `(n, k)` data matrix (k ≥ 2) and fits a
+k-variate normal mixture (the structural parameter `beta` is the
+`k x k` covariance matrix, default the identity). It runs its own
+L-BFGS-B support-point search (the L-BFGS-B of yixuan/LBFGSpp, as in
+the R package) instead of the 1-D engine; the R package documents
+its 2-D version as *experimental and possibly very slow*. At
+k = 2 — invokable as `method="npnorm2Dll"`, the R name (API
+compatibility) — it is still the slowest family relative to R on
+this build (n=300: ≈ 0.91 s vs ≈ 0.8 s, same data — the residual gap
+is the per-cell L-BFGS-B search machinery, after a hand-unrolled 2×2
+density kernel, a 0-division explicit-inverse objective fast path,
+the per-cell hot start *and* the true directional derivative cut the
+old ~28× gap to ~1.2×) — see
+[`docs/PERF.md`](docs/PERF.md). The k = 2 trajectory is bit-
+identical to 0.2.3, the density kernels remain bit-exact with R, and
+the fit converges deterministically to a valid local optimum whose
+density agrees with the R reference within tolerance (k = 2 gate:
+rel-L1 0.0158, max |log diff| 0.169 —
+`tests/verify_2d_same.py`). Higher k is slower: the search grid is
+the tensor product of the per-axis marginal grids (k = 3: 18 points
+per axis ⇒ 4,913 cells, ≈ 2.2 s at n = 360) — see §6.
 
 **Compute architecture:** `Python → C++/Eigen` — a single pybind11
 extension, `npfixedcomppy._core`. The whole compute stack (engine,
@@ -106,24 +109,27 @@ measured evidence: [`docs/PERF.md`](docs/PERF.md).
 | `npnormcvmw` | 正态（分箱）   | Cramér–von Mises 距离        | 尺度（默认 `1`）               |
 | `npnormadw`  | 正态（分箱）   | Anderson–Darling 距离        | 尺度（默认 `1`）               |
 | `nptllw`     | t（分箱）      | 极大似然                     | 自由度（默认 `inf`）           |
-| `npnorm2Dll` | 双变量正态     | 极大似然（实验性）           | 协方差矩阵（默认 `I₂`）        |
+| `npnormND`   | k 元正态（k ≥ 2） | 极大似然                   | 协方差矩阵（默认 `Iₖ`）        |
+| `npnorm2Dll` | `npnormND` 的 k = 2 别名（R 名） | 极大似然（实验性） | 协方差矩阵（默认 `I₂`）        |
 
 分箱（``"...w"``）变体先将观测值合并到网格 `h = 10^order`（默认
 `order = -3`，即 `h = 10^-3`；向下取整，与 R 的 `bin` 一致），再拟合分
 箱核；面向大样本场景，`order` 为额外参数（非分箱族忽略）。
 
-`npnorm2Dll` 接收 `(n, 2)` 数据矩阵，拟合双变量正态混合分布（结构参数
-`beta` 为 `2 x 2` 协方差矩阵，默认单位阵）。它走自带的 L-BFGS-B 支撑点
-搜索（与 R 包相同，即 yixuan/LBFGSpp 的 L-BFGS-B），不复用一维引擎；
-R 包将其标注为*实验性、可能很慢*。本构建下它仍是相对 R 最慢的族
-（n=300：≈ 1.3 s vs ≈ 0.8 s，同一数据——手写展开的 2×2 密度内核、
-0 除法显式逆目标函数快路径与逐格热启动把旧 ~28× 差距收窄到 ~1.7×，
-残余差距在逐格 L-BFGS-B 求解器机制），见
-[`docs/PERF.md`](docs/PERF.md)。逐格目标函数有两条路径：快路径（默认，
-参考运行上单次求值约 2.9× 更快、第二个 n=300 基准上端到端约 3.2× 更快，
-结果与 R **类似**——主成分位置差 ≈ 0.03 内、ll 差 ≈ 0.001 内）与 R 同款
-逐位一致路径（`NPFIC_2D_EXACT=1` 选用）；密度内核本身与 R 逐位一致，
-两条路径都落在有效（参考运行下甚至略优）的局部最优。
+`npnormND` 接收 `(n, k)` 数据矩阵（k ≥ 2），拟合 k 元正态混合分布
+（结构参数 `beta` 为 `k x k` 协方差矩阵，默认单位阵）。它走自带的
+L-BFGS-B 支撑点搜索（与 R 包相同，即 yixuan/LBFGSpp 的 L-BFGS-B），
+不复用一维引擎；R 包将其 2-D 版本标注为*实验性、可能很慢*。k = 2
+——以 `method="npnorm2Dll"`（R 名，API 兼容）调用——在本构建下仍是
+相对 R 最慢的族（n=300：≈ 0.91 s vs ≈ 0.8 s，同一数据——手写展开的
+2×2 密度内核、0 除法显式逆目标函数、逐格热启动与真方向导数把旧
+~28× 差距收窄到 ~1.2×，残余差距在逐格 L-BFGS-B 求解器机制），见
+[`docs/PERF.md`](docs/PERF.md)。k = 2 轨迹与 0.2.3 位级一致，密度
+内核与 R 逐位一致，拟合确定性地收敛到有效局部最优，且密度与 R
+参考在容忍范围内一致（k = 2 门：rel-L1 0.0158、max |log diff|
+0.169，见 `tests/verify_2d_same.py`）。更高 k 更慢：搜索网格是各轴
+marginal 网格的张量积（k = 3：每轴 18 点 ⇒ 4,913 格，n = 360 时
+≈ 2.2 s）——见 §6。
 
 **计算架构：** `Python → C++/Eigen`——单一 pybind11 扩展
 `npfixedcomppy._core`。整个计算栈（引擎、支撑点求解、约束非负最小二乘、
@@ -139,6 +145,63 @@ GEMM/GEMV（不支持则为串行 Eigen）；对固定构建与线程数，相�
 搜索放宽，见上文 "What's new in 0.2.3"，落在类似的、往往略优的局部
 最优上），由 §5 的 parity 门保证。构建内确定性不变：相同输入恒产生
 逐位相同的输出。细节与实测证据见 [`docs/PERF.md`](docs/PERF.md)。
+
+## 2. What's new in 0.3.0 (vs 0.2.3)
+
+**The 2-D family `npnorm2Dll` is generalized to N dimensions —
+`npnormND` — and the R-identical `NPFIC_2D_EXACT` objective path is
+removed.**
+
+* **New family `npnormND` (k ≥ 2)** — the k-variate normal mixture,
+  `computemixdist(X, method="npnormND", beta=...)` with `X` of shape
+  `(n, k)` and `beta` the `k x k` covariance matrix (default the
+  identity):
+
+  * `method="npnorm2Dll"` is kept as the **k = 2 alias** (the R name,
+    API compatibility); the k = 2 result is **bit-identical** to
+    0.2.3 (ll 848.7472072261477 / 10 iters / 5 components on the
+    reference data; ≈ 0.91 s wall).
+  * Kernel: the general `dnormNDarray` (Eigen `LLT`) for k > 2;
+    k = 2 keeps the hand-unrolled 2×2 fast path, so the 2-D
+    trajectory is untouched.
+  * The default grid / initial mixing distribution generalize R's
+    2-D construction: per-axis `gridpoints_npnorm` /
+    `initial_npnorm` combined as a tensor product (each axis padded
+    to the longest). Explicit `gridpoints` (an `m x k` matrix) and
+    `mix` (`{"pt": (m, k), "pr": (m,)}`) are accepted for any k.
+  * The per-cell L-BFGS-B search, the true directional derivative
+    (`1/F_i`-weighted; `docs/PERF.md` §4a.4), the per-cell hot start,
+    and the `grid_gain` certificate all carry over to k dimensions.
+
+* **Removed: the `NPFIC_2D_EXACT=1` objective path** — the R-identical
+  Cholesky kernel (0.2.1's trajectory, ≈ 4.3 s on the reference run).
+  The relaxed contract (density similar within tolerance, `ll` no
+  worse than the historical version) does not require bit-exact
+  trajectories, and the general k-D kernel supersedes its Cholesky
+  path; the k = 2 fast trajectory itself is bit-identical to 0.2.3, so
+  no golden changed. (History and the A/B record: the 0.2.1 section
+  below and `docs/PERF.md` §4a.)
+
+* **N-D performance** — the search grid is the tensor product of the
+  per-axis marginals, (L−1)^k cells for L points per axis, so
+  k ≥ 3 is combinatorially slower than k = 2: k = 3, n = 360,
+  explicit 18-points-per-axis grid (17³ = 4,913 cells): ≈ 2.2 s
+  (11 iters, 4 components, `ll` 1430.711238303976 —
+  `tests/parity_3d.csv`). The default grid at k = 3 would be
+  ≈ 103³ ≈ 1.1 M cells — pass a coarser explicit `gridpoints` for
+  k ≥ 3 (see `docs/PERF.md` §4a).
+
+* **Tests** — `tests/verify_2d_same.py` is now the density-similarity
+  gate vs the R reference (rel-L1 < 0.02, max |log-density|
+  difference < 0.25, main components within 0.70 in location, `ll`
+  no worse than R, `grid_gain > −1`); new `tests/verify_3d.py` pins
+  the 3-D trajectory (determinism, self-consistency recomputed with
+  the public `dnpnormND` kernel, the `grid_gain` certificate, main
+  components near the three known generator modes). All eleven parity
+  suites report `TOTAL BAD: 0`.
+
+Version sources bumped to `0.3.0` (`pyproject.toml` single source,
+`setup.py` mirrored; the compiled extension reports `0.3.0`).
 
 ## 2. What's new in 0.2.3 (vs 0.2.2)
 
@@ -204,6 +267,52 @@ Version sources bumped to `0.2.3` (`pyproject.toml` single source,
 `freshms=`); on the current build the `nptll` β=5, n=5000 case runs
 1191 gradient evaluations / 61 fresh off-grid columns (vs 3733 / 455
 pre-relaxation) — see [`docs/PERF.md`](docs/PERF.md) §1.
+
+### 0.3.0 更新内容（相对 0.2.3）
+
+**2-D 族 `npnorm2Dll` 泛化为 N 维——新族 `npnormND`——并移除 R 同款的
+`NPFIC_2D_EXACT` 目标函数路径。**
+
+* **新族 `npnormND`（k ≥ 2）**——k 元正态混合：
+  `computemixdist(X, method="npnormND", beta=...)`，`X` 为 `(n, k)`，
+  `beta` 为 `k x k` 协方差矩阵（默认单位阵）：
+
+  * `method="npnorm2Dll"` 保留为 **k = 2 别名**（R 名，API 兼容）；
+    k = 2 的结果与 0.2.3 **位级一致**（参考数据上
+    ll 848.7472072261477 / 10 次迭代 / 5 成分；≈ 0.91 s wall）。
+  * 核：k > 2 走通用 `dnormNDarray`（Eigen `LLT`）；k = 2 保留手写
+    展开的 2×2 快路径，2-D 轨迹不受影响。
+  * 默认网格/初始混合分布是 R 2-D 构造的 N-D 推广：每轴
+    `gridpoints_npnorm` / `initial_npnorm` 取张量积（各轴补齐到最长
+    轴）。任意 k 都接受显式 `gridpoints`（`m x k` 矩阵）与 `mix`
+    （`{"pt": (m, k), "pr": (m,)}`）。
+  * 逐格 L-BFGS-B 搜索、真方向导数（`1/F_i` 加权；
+    `docs/PERF.md` §4a.4）、逐格热启动与 `grid_gain` 证书全部推广到
+    k 维。
+
+* **移除：`NPFIC_2D_EXACT=1` 目标函数路径**——R 同款 Cholesky 内核
+  （0.2.1 的轨迹，参考运行 ≈ 4.3 s）。放宽后的验收契约（密度在容忍
+  范围内相似、`ll` 不差于历史版本）不要求逐位轨迹一致，且通用 k-D
+  核已取代其 Cholesky 路径；k = 2 的 fast 轨迹本身与 0.2.3 位级一致，
+  故金标无变化。（历史与 A/B 记录见下文 0.2.1 节与
+  `docs/PERF.md` §4a。）
+
+* **N-D 性能**——搜索网格是各轴 marginal 的张量积，每轴 L 点即
+  (L−1)^k 格，所以 k ≥ 3 相对 k = 2 组合式变慢：k = 3、n = 360、
+  显式 18 点/轴网格（17³ = 4,913 格）≈ 2.2 s（11 次迭代、4 成分、
+  `ll` 1430.711238303976——`tests/parity_3d.csv`）。k = 3 的默认
+  网格约为 103³ ≈ 110 万格——k ≥ 3 请显式传较粗的 `gridpoints`
+  （见 `docs/PERF.md` §4a）。
+
+* **测试**——`tests/verify_2d_same.py` 改为对 R 参考的密度相似度门
+  （rel-L1 < 0.02、max |log-density| 差 < 0.25、主成分位置差 0.70
+  内、`ll` 不劣于 R、`grid_gain > −1`）；新增 `tests/verify_3d.py`
+  固定 3-D 轨迹（确定性、用公开 `dnpnormND` 核重算的自洽、
+  `grid_gain` 证书、主成分贴近三个已知生成器模态）。全部 11 个
+  parity 套件报告 `TOTAL BAD: 0`。
+
+版本源升到 `0.3.0`（`pyproject.toml` 为唯一源、`setup.py` 同步；
+编译扩展报告 `0.3.0`）。
 
 ### 0.2.3 更新内容（相对 0.2.2）
 
@@ -303,7 +412,7 @@ parity suites report `TOTAL BAD: 0` on the current build (the default
 path is bit-identical to 0.2.1).
 
 *Historical note: this section describes the 0.2.2 build; the current
-build is 0.2.3, which superseded `NPFIC_WARM` (see above) and
+build is 0.3.0, which superseded `NPFIC_WARM` (see above) and
 re-recorded the trajectory goldens.*
 
 ### 0.2.2 更新内容（相对 0.2.1）
@@ -339,7 +448,7 @@ re-recorded the trajectory goldens.*
 编译扩展报告 `0.2.2`）。当前构建上全部 10 个 parity 套件报告
 `TOTAL BAD: 0`（默认路径与 0.2.1 逐位一致）。
 
-*历史注记：本节描述 0.2.2 构建；当前构建为 0.2.3，已取代
+*历史注记：本节描述 0.2.2 构建；当前构建为 0.3.0，已取代
 `NPFIC_WARM`（见上）并重录了轨迹金标。*
 
 ## 2. What's new in 0.2.1 (vs 0.2.0)
@@ -365,8 +474,9 @@ exported at the top level, all backed by the C++/Eigen core:
 * `dnpnorm`, `pnpnorm`, `dnpnormc`, `dnpt`, `pnpt`, `dnpdiscnorm`,
   `pnpdiscnorm`, `dnppois`, `pnppois`, `dnpdisct` (1-D families, both
   `lg` log-space forms);
-* `dnpnormND` (2-D mixture density) and `dnormNDarray` (the `(n, k)`
-  multivariate-normal pdf kernel, log form available).
+* `dnpnormND` (the k-D normal mixture density, k ≥ 2) and
+  `dnormNDarray` (the `(n, k)` multivariate-normal pdf kernel, log
+  form available).
 
 Every one of these reproduces the R package's **exact** code paths
 (including R's quirks, e.g. the `dnppois` log-path normal-term
@@ -423,12 +533,13 @@ result*, the per-cell L-BFGS-B objective was re-derived for n = 2:
   the weighted sum `Σ_i (t_i/F_i)(μ − x_i)` (≈ 3 extra FLOPs/point,
   values already hot), so L-BFGS-B descends the actual objective; the
   objective *value* arithmetic stays bit-identical and the
-  `NPFIC_2D_EXACT=1` trajectory is bit-identical to the pre-change
-  build. The reference fit moves to ll 848.7472072261477 (10 iters),
-  *closer* to the exact path (|Δll| vs it: 6.4e-4 → 7.5e-5);
-  `LBFGSB.h` gains a stale-curvature restart guard (reset the BFGS
-  history, take steepest descent when `grad·d >= 0`) that never fires
-  on the exact path ([`docs/PERF.md`](docs/PERF.md) §4a.4).
+  `NPFIC_2D_EXACT=1` trajectory (then the only other path) was
+  bit-identical to the pre-change build. The reference fit moves to ll
+  848.7472072261477 (10 iters), *closer* to the exact path (|Δll| vs
+  it: 6.4e-4 → 7.5e-5); `LBFGSB.h` gains a stale-curvature restart
+  guard (reset the BFGS history, take steepest descent when
+  `grad·d >= 0`) that never fires on the exact path
+  ([`docs/PERF.md`](docs/PERF.md) §4a.4).
 * **Similarity, not identity**: on the reference data the exact path
   converges in 6 iters and the fast in 10, both to a 5-component
   mixture whose main components agree within ≈ 0.007 in location
@@ -454,9 +565,10 @@ result*, the per-cell L-BFGS-B objective was re-derived for n = 2:
   parity gate now fails on `grid_gain < −1` (post-fix: +4.7e-3 fast,
   +2.7e-7 exact on the reference fit; an independent numpy
   recomputation matches the C++ value to < 1e-13).
-* **R-identical escape hatch**: `NPFIC_2D_EXACT=1` selects the
+* **R-identical escape hatch**: `NPFIC_2D_EXACT=1` selected the
   original Cholesky-based kernel — the bit-exact 0.2.1 trajectory (ll
-  848.7472820349071 on the reference run).
+  848.7472820349071 on the reference run). **Removed in 0.3.0** with
+  the N-D generalization ("What's new in 0.3.0").
 * **Alternative solvers were also evaluated** (rejected ones are **not**
   vendored; nothing was added to the tree): CppNumericalSolvers'
   `LbfgsbSolver` (GPL/MIT dual) measured live via a temporary adapter
@@ -546,8 +658,8 @@ All ten parity suites report `TOTAL BAD: 0` on the current build.
 * `dnpnorm`、`pnpnorm`、`dnpnormc`、`dnpt`、`pnpt`、`dnpdiscnorm`、
   `pnpdiscnorm`、`dnppois`、`pnppois`、`dnpdisct`（一维族，均含 `lg`
   对数空间形式）；
-* `dnpnormND`（二维混合密度）与 `dnormNDarray`（`(n, k)` 多元正态 pdf
-  核，可选对数形式）。
+* `dnpnormND`（k 元正态混合密度，k ≥ 2）与 `dnormNDarray`（`(n, k)`
+  多元正态 pdf 核，可选对数形式）。
 
 上述每个函数都精确复现 R 包的**原始代码路径**（包括 R 的怪癖，如
 `dnppois` 对数路径的正态项复制粘贴错误、`dnpnormc` 在点质量支撑点处
@@ -588,11 +700,12 @@ n = 2 重新推导：
   的梯度——只有当 `1/(dens+precompute)` 在数据上近似为常数时，它才与
   真 gain 梯度成比例。现改为累加带权求和 `Σ_i (t_i/F_i)(μ − x_i)`
   （每点约 3 个额外 FLOP，值本已热），L-BFGS-B 真正沿目标函数下降；
-  目标函数*值*的算术保持位级一致，`NPFIC_2D_EXACT=1` 轨迹与改动前
-  构建逐位一致。参考拟合移到 ll 848.7472072261477（10 次迭代），
-  与 exact 路径更近（|Δll|：6.4e-4 → 7.5e-5）；`LBFGSB.h` 新增
-  过期曲率重启守卫（`grad·d >= 0` 时重置 BFGS 历史、改走最速下降），
-  在 exact 路径上从不触发（[`docs/PERF.md`](docs/PERF.md) §4a.4）。
+  目标函数*值*的算术保持位级一致，`NPFIC_2D_EXACT=1` 轨迹（当时唯一
+  的另一条路径）与改动前构建逐位一致。参考拟合移到
+  ll 848.7472072261477（10 次迭代），与 exact 路径更近（|Δll|：
+  6.4e-4 → 7.5e-5）；`LBFGSB.h` 新增过期曲率重启守卫（`grad·d >= 0`
+  时重置 BFGS 历史、改走最速下降），在 exact 路径上从不触发
+  （[`docs/PERF.md`](docs/PERF.md) §4a.4）。
 * **类似而非相同**：参考数据上 exact 路径 6 次迭代、fast 路径 10 次
   迭代，均收敛到 5 成分混合，主成分位置差 ≈ 0.007 内（ll 848.7472
   fast vs 848.7473 exact vs 848.888 R，|Δll| ≈ 7.5e-5）；第二个基准
@@ -610,8 +723,9 @@ n = 2 重新推导：
   ≈ 0.06 内。修复为直接读两列（`data_.col(0)` / `data_.col(1)`），
   parity 门现在在 `grid_gain < −1` 时失败（修复后参考拟合：fast
   +4.7e-3、exact +2.7e-7；独立 numpy 重算与 C++ 值 < 1e-13 吻合）。
-* **R 同款逃生门**：`NPFIC_2D_EXACT=1` 选用原 Cholesky 内核——即
+* **R 同款逃生门**：`NPFIC_2D_EXACT=1` 曾选用原 Cholesky 内核——即
   bit-exact 的 0.2.1 轨迹（参考运行 ll 848.7472820349071）。
+  **0.3.0 随 N-D 泛化移除**（见 "What's new in 0.3.0"）。
 * **替代求解器也一并评估**（被否决者**未** vendored，代码树零新增
   依赖）：CppNumericalSolvers 的 `LbfgsbSolver`（GPL/MIT 双许可）曾
   经临时适配器实测后撤出——另一实现（投影梯度容差硬编码 1e-4、
@@ -965,9 +1079,9 @@ faster while preserving the `tol` guarantee on the statistic;
 |----------------|----------------------------------------------------------------|
 | `pt`, `pr`     | support points (incl. fixed components, ascending) and weights |
 | `beta`         | structural parameter actually used                             |
-| `family`       | `"npnorm"` / `"npt"` / `"npnormc"` / `"nppois"`                |
+| `family`       | `"npnorm"` / `"npt"` / `"npnormc"` / `"nppois"` / `"npnorm2D"` (k = 2) / `"npnormND"` (k > 2) |
 | `min_gradient` | min gradient w.r.t. a new support point (≤ 0 at convergence)   |
-| `grid_gain`    | min gain over all grid points (1-D) / cell midpoints (2-D) at the final estimate (grid-level certificate; informational — see "What's new in 0.2.3") |
+| `grid_gain`    | min gain over all grid points (1-D) / cell midpoints (N-D normal family) at the final estimate (grid-level certificate; informational — see "What's new in 0.2.3") |
 | `ll`           | loss at the estimate (−log-likelihood or the distance)         |
 | `flag`         | `"d0"` (derivative-free search) / `"d1"` (improved Brent)      |
 | `iter`         | outer iterations performed                                     |
@@ -994,7 +1108,7 @@ in the C++/Eigen core, take array-like `x`/`mu0`/`pi0`, and return an
 | `dnppois(x, mu0, pi0, stdev=1.0, lg=False)` | Poisson mixture pdf — `nppoisll` kernel (R `dnppois`; `stdev` only reaches the `lg` normal-term quirk) |
 | `pnppois(x, mu0, pi0, lt=True, lg=False)` | Poisson mixture cdf (R `pnppois`) |
 | `dnpdisct(x, mu0, pi0, df, h, lg=False)` | binned t mixture pdf — `nptllw` kernel (R `dnpdisct`) |
-| `dnpnormND(x, mu0, pi0, sigma, lg=False)` | 2-D (bivariate) normal mixture pdf — `npnorm2Dll` kernel (R `dnpnormND`) |
+| `dnpnormND(x, mu0, pi0, sigma, lg=False)` | k-D normal mixture pdf (k ≥ 2) — `npnormND` kernel; k = 2 is R `npnorm2Dll` (R `dnpnormND`) |
 | `dnormNDarray(x, mu0, sigma, lg=False)` | the `(n, k)` multivariate-normal pdf kernel (R `dnormNDarray_`) |
 
 These reproduce R's exact code paths — including its quirks (the
@@ -1044,9 +1158,9 @@ inner_tol=1e-4) -> Npmix`**
 |----------------|--------------------------------------------------------------|
 | `pt`、`pr`     | 支撑点（含固定分量，升序）与权重                             |
 | `beta`         | 实际使用的结构参数                                           |
-| `family`       | `"npnorm"` / `"npt"` / `"npnormc"` / `"nppois"`              |
+| `family`       | `"npnorm"` / `"npt"` / `"npnormc"` / `"nppois"` / `"npnorm2D"`（k = 2）/ `"npnormND"`（k > 2） |
 | `min_gradient` | 对新支撑点的最小梯度（收敛解处 ≤ 0）                         |
-| `grid_gain`    | 最终估计下全部网格点（一维）/格中心（二维）的最小增益（网格级证书；信息性输出——见 "What's new in 0.2.3"） |
+| `grid_gain`    | 最终估计下全部网格点（一维）/格中心（N-D 正态族）的最小增益（网格级证书；信息性输出——见 "What's new in 0.2.3"） |
 | `ll`           | 估计处的损失（负对数似然或距离）                             |
 | `flag`         | `"d0"`（无导数搜索） / `"d1"`（改进 Brent）                  |
 | `iter`         | 执行的外层迭代数                                             |
@@ -1071,7 +1185,7 @@ C++/Eigen 核，接受 array-like 的 `x`/`mu0`/`pi0`，返回 `ndarray`：
 | `dnppois(x, mu0, pi0, stdev=1.0, lg=False)` | 泊松混合 pdf —— `nppoisll` 核（R `dnppois`；`stdev` 仅出现在 `lg` 的正态项怪癖中） |
 | `pnppois(x, mu0, pi0, lt=True, lg=False)` | 泊松混合 cdf（R `pnppois`） |
 | `dnpdisct(x, mu0, pi0, df, h, lg=False)` | 分箱 t 混合 pdf —— `nptllw` 核（R `dnpdisct`） |
-| `dnpnormND(x, mu0, pi0, sigma, lg=False)` | 双变量正态混合 pdf —— `npnorm2Dll` 核（R `dnpnormND`） |
+| `dnpnormND(x, mu0, pi0, sigma, lg=False)` | k 元正态混合 pdf（k ≥ 2）—— `npnormND` 核；k = 2 即 R `npnorm2Dll`（R `dnpnormND`） |
 | `dnormNDarray(x, mu0, sigma, lg=False)` | `(n, k)` 多元正态 pdf 核（R `dnormNDarray_`） |
 
 它们精确复现 R 的原始代码路径——包括 R 的怪癖（`dnppois` 的 `lg`
@@ -1121,21 +1235,23 @@ exits non-zero on failure):
   parity gate (`dnp*` / `pnp*` / `dnormNDarray` against live R 4.6.1
   gold values; finite values ≤ 1.2e-15 relative, NaNs at identical
   positions).
-- `python tests\verify_2d_same.py` — the `npnorm2Dll` gate (a
-  *similarity* gate since the objective fast path, §4a.2 of
-  [`docs/PERF.md`](docs/PERF.md)): per-path two-run determinism and
-  convergence for both the fast (default) and the R-identical
-  (`NPFIC_2D_EXACT=1`) objective path, ll bands, per-`solvegrad`
-  `ll` self-consistency, and **kernel** parity (PY's `dnpnormND` at
-  R's final points reproduces R's ll to 1e-9), plus a
-  no-worse-than-R local-optimum check and a fast-vs-exact mixture
-  proximity check (main components within 0.08 in location,
-  |Δll| < 2e-2).
+- `python tests\verify_2d_same.py` — the `npnorm2Dll` (k = 2) gate (a
+  *similarity* gate, §4a of [`docs/PERF.md`](docs/PERF.md)): two-run
+  determinism and convergence, the recorded ll, `ll` self-consistency,
+  **kernel** parity (PY's `dnpnormND` at R's final points reproduces
+  R's ll to 1e-9), a no-worse-than-R local-optimum check, and the
+  density similarity vs R (rel-L1 < 0.02, max |log diff| < 0.25,
+  main components within 0.70).
+- `python tests\verify_3d.py` — the 3-D `npnormND` gate: two-run
+  determinism, convergence, the recorded ll, `ll` self-consistency
+  (recomputed with the public `dnpnormND` kernel), shape/family
+  checks, the `grid_gain` certificate, and main components near the
+  three known generator modes (no R reference exists for k = 3).
 - `python tests\perf_baseline.py` — wall-time baseline of the public API.
 - `python tests\bench_binned.py` — wall-time bench for the binned
   families (the R-side counterpart is `tests\bench_binned_r.R`).
 
-All ten parity suites must report `TOTAL BAD: 0`. The package is
+All eleven parity suites must report `TOTAL BAD: 0`. The package is
 **deterministic per build**: for a fixed build and a fixed
 `OMP_NUM_THREADS`, identical inputs produce bit-identical outputs (unlike
 the R package on parallel platforms).
@@ -1172,18 +1288,20 @@ the R package on parallel platforms).
 - `python tests\verify_kernels.py` — 30 例一维/二维**核**对拍门
   （`dnp*` / `pnp*` / `dnormNDarray` 对比 R 4.6.1 实测金标值；有限值
   相对误差 ≤ 1.2e-15，NaN 位置一致）。
-- `python tests\verify_2d_same.py` — `npnorm2Dll` 门（目标函数快路径
-  之后改为*类似性*门，见
-  [`docs/PERF.md`](docs/PERF.md) §4a.2）：快路径（默认）与 R 同款
-  （`NPFIC_2D_EXACT=1`）两条路径各自的双次运行确定性与收敛、ll 带宽、
-  每次 `solvegrad` 的 `ll` 自洽，以及**核**对拍（PY 的 `dnpnormND` 在
-  R 最终点上复现 R 的 ll 至 1e-9），并校验两条路径的局部最优均不劣于
-  R、以及两路径混合接近度（主成分位置差 < 0.08、|Δll| < 2e-2）。
+- `python tests\verify_2d_same.py` — `npnorm2Dll`（k = 2）门（*类似性*
+  门，见 [`docs/PERF.md`](docs/PERF.md) §4a）：双次运行确定性与收敛、
+  录制的 ll、`ll` 自洽、**核**对拍（PY 的 `dnpnormND` 在 R 最终点上
+  复现 R 的 ll 至 1e-9）、局部最优不劣于 R，以及密度相似度
+  （rel-L1 < 0.02、max |log diff| < 0.25、主成分位置差 < 0.70）。
+- `python tests\verify_3d.py` — 3-D `npnormND` 门：双次运行确定性、
+  收敛、录制的 ll、`ll` 自洽（用公开的 `dnpnormND` 核重算）、shape/
+  family 校验、`grid_gain` 证书、主成分贴近三个已知的生成器模态
+  （k = 3 无 R 参考）。
 - `python tests\perf_baseline.py` — 公开 API 的耗时基线。
 - `python tests\bench_binned.py` — 分箱族耗时 bench（R 侧对应脚本为
   `tests\bench_binned_r.R`）。
 
-十个 parity 套件必须全部报告 `TOTAL BAD: 0`。本包对**给定构建与线程数**
+十一个 parity 套件必须全部报告 `TOTAL BAD: 0`。本包对**给定构建与线程数**
 是确定性的：相同输入恒产生逐位相同的输出（并行平台上的 R 包做不到这一
 点）。
 
@@ -1207,7 +1325,8 @@ excluded):
 | `computemixdist(x, method="npnormad")`, n=1000 | ≈ 37 ms | ≈ 59 ms |
 | `computemixdist(x, method="nppoisll")`, n=1000 | ≈ 0.45 ms | ≈ 5 ms |
 | `estpi0(x, method="npnormll")`, n=1000 | ≈ 14 ms | ≈ 97 ms |
-| `computemixdist(X, method="npnorm2Dll")`, n=300 (2-D) | ≈ 0.95 s | ≈ 0.8 s |
+| `computemixdist(X, method="npnorm2Dll")`, n=300 (2-D) | ≈ 0.91 s | ≈ 0.8 s |
+| `computemixdist(X, method="npnormND")`, n=360 (3-D) | ≈ 2.2 s (18 pts/axis grid) | — (no R counterpart) |
 
 Binned (`order = -3`, i.e. `h = 10^-3`):
 
@@ -1222,38 +1341,48 @@ Binned (`order = -3`, i.e. `h = 10^-3`):
 \* `npnormadw` fits wander between basins run-to-run in both
 implementations, so this ratio is indicative.
 
-The 2-D row above is the documented *exception*: `npnorm2Dll` is an
-experimental family whose per-outer-iteration support-point search
-launches one L-BFGS-B problem **per grid cell** (103 × 103 for the
-default grid) and, unlike the 1-D engine, it does not use the kernel
-column cache (evaluated and rejected — `docs/PERF.md` §4a.3: the line
-search evaluates arbitrary interior points, so a per-cell column cache
-would cover only a small fraction of the evaluations). Four changes
-now cut the old ~28× gap to ~1.3×: (i) a hand-unrolled 2×2
-density-kernel fast path (cutting the original `dec.solve(d)` port from
-≈ 44 µs/call to ≈ 6.5 µs/call at n=300 for `dnormNDarray`, ≈ 7.4 µs
-for `dnpnormND` — the old gap's main source, since MSVC keeps the
-per-point heap temporaries that the R build's GCC eliminates); (ii) an
-objective fast path with an explicit-inverse quadratic form (0
-divisions/point), per-`solvegrad` invariant caching, and preallocated
-buffers — the default, which cuts the per-evaluation cost ≈ 10.2 →
-≈ 4.4 µs on the reference run; (iii) a per-cell hot start +
-negative-gain early stop (the previous `solvegrad`'s converged point per
-cell as the next call's L-BFGS-B start; a still-negative warm root or a
-negative grid point costs one evaluation); and (iv) the true
-directional derivative of the gain objective (the R-ported unweighted
-form is the gradient of the *unnormalised* KDE, aligned with the gain
-gradient only when 1/F is ~constant), which moves the trajectory to a
-closer, cheaper optimum (|Δll| vs the exact path 6.4e-4 → 7.5e-5 on
-the reference run) behind a stale-curvature restart guard in
-`LBFGSB.h` that never fires on the exact path. (iii) and (iv) together
-drop the evaluation count 421,810 → 216,955 on the reference run and
+The k = 2 row above is the documented *exception*: `npnorm2Dll` (the R
+name; in 0.3.0 the k = 2 alias of `npnormND`) is an experimental
+family whose per-outer-iteration support-point search launches one
+L-BFGS-B problem **per grid cell** (103 × 103 for the default 104 × 104
+grid) and, unlike the 1-D engine, it does not use the kernel column
+cache (evaluated and rejected — `docs/PERF.md` §4a.3: the line search
+evaluates arbitrary interior points, so a per-cell column cache would
+cover only a small fraction of the evaluations). Four changes cut the
+old ~28× gap to ~1.2×: (i) a hand-unrolled 2×2 density-kernel fast
+path (cutting the original `dec.solve(d)` port from ≈ 44 µs/call to
+≈ 6.5 µs/call at n=300 for `dnormNDarray`, ≈ 7.4 µs for `dnpnormND`
+— the old gap's main source, since MSVC keeps the per-point heap
+temporaries that the R build's GCC eliminates); (ii) an objective fast
+path with an explicit-inverse quadratic form (0 divisions/point),
+per-`solvegrad` invariant caching, and preallocated buffers — the
+0.2.x A/B record is ≈ 10.2 → ≈ 4.2 µs per evaluation on the reference
+run (4.3 s → 0.95 s end-to-end; the 0.3.0 build measures ≈ 0.91 s);
+(iii) a per-cell hot start + negative-gain early stop (the previous
+`solvegrad`'s converged point per cell as the next call's L-BFGS-B
+start; a still-negative warm root or a negative grid point costs one
+evaluation); and (iv) the true directional derivative of the gain
+objective (the R-ported unweighted form is the gradient of the
+*unnormalised* KDE, aligned with the gain gradient only when 1/F is
+~constant), which moves the trajectory to a closer, cheaper optimum
+(|Δll| vs the removed R-identical path: 6.4e-4 → 7.5e-5 on the
+reference run) behind a stale-curvature restart guard in `LBFGSB.h`.
+(iii) and (iv) together drop the evaluation count 421,810 (the
+R-identical path, 0.2.x) → 216,955 on the reference run and
 769,533 → 316,253 on the second n=300 benchmark. The density kernels
-remain bit-exact with R, and both paths land on a similar valid
-optimum (main components within ≈ 0.007, ll within ≈ 8e-5 on the
-reference run; ≈ 0.027 / 1.7e-3 on the second); `NPFIC_2D_EXACT=1`
-selects the bit-exact R-identical path. See [`docs/PERF.md`](docs/PERF.md)
-for the breakdown.
+remain bit-exact with R and the k = 2 trajectory is bit-identical to
+0.2.3; the fit's density agrees with the R reference within
+tolerance (rel-L1 0.0158, max |log diff| 0.169, main components
+within 0.675 — `tests/verify_2d_same.py`). See
+[`docs/PERF.md`](docs/PERF.md) for the breakdown.
+
+N-D scaling: the search grid is the tensor product of the per-axis
+marginals — (L−1)^k cells for L points per axis — so higher k is
+combinatorially slower: k = 3 with an explicit 18-points-per-axis grid
+(17³ = 4,913 cells) runs in ≈ 2.2 s at n = 360, while the default
+grid (≈ 104 points per axis) would be 103³ ≈ 1.1 M cells — pass a
+coarser explicit `gridpoints` for k ≥ 3 (`tests/verify_3d.py` uses
+18 per axis).
 
 For the `t` family with small degrees of freedom the cost grows with `n`
 (super-linearly — the per-point `dnt` kernel has no cheap identity), so
@@ -1271,9 +1400,7 @@ cache, and the full comparison with R.
 Environment knobs: `NPFIXEDCOMPY_PROFILE=1` prints a per-phase timing
 line (solvegrad / mapping / loss / weights / collapse, plus the
 `solvegrad` evaluation count and the fresh-column count/time) to
-stderr; `NPFIC_2D_EXACT=1` selects the bit-exact R-identical
-`npnorm2Dll` objective path (default: the fast path, §4a.2 of
-[`docs/PERF.md`](docs/PERF.md)); `NPFIC_REFINE_STEPS` caps the
+stderr; `NPFIC_REFINE_STEPS` caps the
 per-candidate refinement steps inside `brmin`/`dfmin` (experimental,
 default `-1` = unlimited = shipped behaviour, see What's new);
 `OMP_NUM_THREADS` sizes Eigen's pool (when the build has OpenMP)
@@ -1299,7 +1426,8 @@ OpenMP 探测通过时启用 Eigen 自身的并行 GEMM/GEMV）；内核列缓�
 | `computemixdist(x, method="npnormad")`，n=1000 | ≈ 37 ms | ≈ 59 ms |
 | `computemixdist(x, method="nppoisll")`，n=1000 | ≈ 0.45 ms | ≈ 5 ms |
 | `estpi0(x, method="npnormll")`，n=1000 | ≈ 14 ms | ≈ 97 ms |
-| `computemixdist(X, method="npnorm2Dll")`，n=300（二维） | ≈ 0.95 s | ≈ 0.8 s |
+| `computemixdist(X, method="npnorm2Dll")`，n=300（二维） | ≈ 0.91 s | ≈ 0.8 s |
+| `computemixdist(X, method="npnormND")`，n=360（三维） | ≈ 2.2 s（18 点/轴网格） | —（无 R 对应） |
 
 分箱（`order = -3`，即 `h = 10^-3`）：
 
@@ -1313,28 +1441,35 @@ OpenMP 探测通过时启用 Eigen 自身的并行 GEMM/GEMV）；内核列缓�
 
 \* `npnormadw` 在两侧实现中都存在逐次运行的 basin 漂移，该比值仅作参考。
 
-上表 2-D 一行是**有记录的例外**：`npnorm2Dll` 是实验性族，其每轮外层
-迭代的支撑点搜索对**每个网格单元**各启动一个 L-BFGS-B 问题（默认网格
+上表 k = 2 一行是**有记录的例外**：`npnorm2Dll`（R 名；0.3.0 起为
+`npnormND` 的 k = 2 别名）是实验性族，其每轮外层迭代的支撑点搜索对
+**每个网格单元**各启动一个 L-BFGS-B 问题（默认 104 × 104 网格的
 103 × 103），且与一维引擎不同，它不使用内核列缓存（已评估并否决——
 `docs/PERF.md` §4a.3：线搜索会求值任意内部点，逐格列缓存只能覆盖很小
-比例的求值）。四处改动把旧 ~28× 差距收窄到 ~1.3×：(i) 手写展开的 2×2
+比例的求值）。四处改动把旧 ~28× 差距收窄到 ~1.2×：(i) 手写展开的 2×2
 密度内核快路径（把最初逐行照搬的 `dec.solve(d)` 从 ≈ 44 µs/次降到
 ≈ 6.5 µs/次，n=300 的 `dnormNDarray`；`dnpnormND` ≈ 7.4 µs/次——旧
 差距的主要来源：MSVC 保留了逐点堆临时对象，而 R 构建的 GCC 会消除
-它们）；(ii) 目标函数快路径（默认）——显式逆矩阵二次型（每点 0 次
-除法）、每次 `solvegrad` 的不变量缓存、预分配缓冲——参考运行上把单次
-求值从 ≈ 10.2 µs 降到 ≈ 4.4 µs；(iii) 逐格热启动 + 负增益早停（上一轮
-`solvegrad` 每格收敛点作为本轮 L-BFGS-B 起点；仍为负的温热根或负网格
-点只花一次求值）；(iv) gain 目标函数的真方向导数（R 移植的无权重形式
-是*未归一化* KDE 的梯度，只有 1/F 近似为常数时才与 gain 梯度对齐），
-把轨迹移到更近更便宜的极小（|Δll| 相对 exact 路径 6.4e-4 → 7.5e-5，
-参考运行），其背后是 `LBFGSB.h` 中一个在 exact 路径上从不触发的过期
-曲率重启守卫。(iii) 与 (iv) 合计把求值数从参考运行的 421,810 降到
-216,955、第二个 n=300 基准从 769,533 降到 316,253。密度核本身仍与 R
-逐位一致，两条路径都落在类似的**有效**最优（参考运行上主成分位置差
-≈ 0.007 内、ll 差 ≈ 8e-5 内；第二个基准上 ≈ 0.027 / 1.7e-3）；
-`NPFIC_2D_EXACT=1` 选用 bit-exact 的 R 同款路径。分解见
-[`docs/PERF.md`](docs/PERF.md)。
+它们）；(ii) 目标函数快路径——显式逆矩阵二次型（每点 0 次除法）、每次
+`solvegrad` 的不变量缓存、预分配缓冲——0.2.x A/B 记录：参考运行上单次
+求值 ≈ 10.2 → ≈ 4.2 µs（端到端 4.3 s → 0.95 s；0.3.0 构建实测
+≈ 0.91 s）；(iii) 逐格热启动 + 负增益早停（上一轮 `solvegrad` 每格
+收敛点作为本轮 L-BFGS-B 起点；仍为负的温热根或负网格点只花一次求值）；
+(iv) gain 目标函数的真方向导数（R 移植的无权重形式是*未归一化* KDE 的
+梯度，只有 1/F 近似为常数时才与 gain 梯度对齐），把轨迹移到更近更便宜
+的极小（|Δll| 相对已移除的 R 同款路径：6.4e-4 → 7.5e-5，参考运行），
+其背后是 `LBFGSB.h` 中的过期曲率重启守卫。(iii) 与 (iv) 合计把求值数
+从 R 同款路径（0.2.x）的 421,810 降到参考运行的 216,955、第二个 n=300
+基准从 769,533 降到 316,253。密度核本身仍与 R 逐位一致，k = 2 轨迹与
+0.2.3 位级一致；拟合密度与 R 参考在容忍范围内一致（rel-L1 0.0158、
+max |log diff| 0.169、主成分位置差 0.675 内，`tests/verify_2d_same.py`）。
+分解见 [`docs/PERF.md`](docs/PERF.md)。
+
+N-D 扩展：搜索网格是各轴 marginal 的张量积——每轴 L 点即 (L−1)^k 格——
+所以 k 更高时组合式变慢：k = 3 用显式 18 点/轴网格（17³ = 4,913 格）
+在 n = 360 时 ≈ 2.2 s；而默认网格（每轴 ≈ 104 点）是 103³ ≈ 110 万
+格——k ≥ 3 建议显式传较粗的 `gridpoints`（`tests/verify_3d.py` 用每
+轴 18 点）。
 
 t 族在小自由度下 `dnt` 核没有廉价恒等式，成本随 `n` 超线性增长，`n` 很
 大时较慢；正态族为线性。分箱 `npnormllw` 族比 R 的分箱正态快约 3 倍
@@ -1346,9 +1481,7 @@ t 族的核是廉价的 CDF 差值，快约 8–14 倍。分阶段 profile、内
 
 环境旋钮：`NPFIXEDCOMPY_PROFILE=1` 向 stderr 输出分阶段计时
 （solvegrad / mapping / loss / weights / collapse，外加 `solvegrad`
-的求值次数与 fresh 核列数/耗时）；`NPFIC_2D_EXACT=1` 选用
-`npnorm2Dll` 的 bit-exact R 同款目标函数路径（默认：快路径，见
-[`docs/PERF.md`](docs/PERF.md) §4a.2）；`NPFIC_REFINE_STEPS` 限制
+的求值次数与 fresh 核列数/耗时）；`NPFIC_REFINE_STEPS` 限制
 `brmin`/`dfmin` 内每个候选点的精修步数（实验性，默认 `-1` = 不限制
 = shipped 行为，见 What's new）；`OMP_NUM_THREADS` 调整 Eigen 线程池
 大小（OpenMP 构建时），不改变结果。0.2.2 的 `NPFIC_WARM` 旋钮

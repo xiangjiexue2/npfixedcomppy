@@ -33,11 +33,11 @@
 | pybind11 绑定 | `cpp/npfc_py.cpp` | 每个族一个入口函数（`npnormll`、`nptll`、`npnormllw`、…），把 numpy 数组转 `std::vector`，构造 `MixSolver` + 族对象，调 `computemixdist` / `estpi0`，`finish()` 的结果转 dict |
 | 引擎 | `cpp/npfc_engine.h` | `MixSolver`：外层主循环、`solvegrad`（支撑点搜索）、`brmin`/`dfmin`、`collapse`、`estpi0`/`estpi0_fast`、`finish`；混合适用工具 `sortmix`/`simplifymix`/`collapsemix`；`Family` 虚接口定义 |
 | 一维族 | `cpp/npfc_families.h` | 11 个一维族的实现：`lossfunction`、`mapping`、`gradfun`/`gradfunvec`、`computeweights`、`prepare_solve`、`prepare`、per-solve 不变量缓存 |
-| 二维族 | `cpp/npfc_fam2d.h` | `npnorm2Dll`：自带一套外层循环（结构同上），权重子问题用 `LBFGSpp::LBFGSBSolver`（有界 LBFGS），核为 2-D 正态（手展开 2×2 Cholesky 快路径） |
+| 多元正态族（N-D） | `cpp/npfc_famnd.h` | `npnormND`（R `npnorm2Dll` 的 N-D 泛化；k = 2 即 R 的双变量族，绑定名 `npnorm2Dll` 保留为别名）：自带一套外层循环（结构同上），权重子问题用 `LBFGSpp::LBFGSBSolver`（有界 LBFGS），核为 N-D 正态（k = 2 走手展开 2×2 Cholesky 快路径，k > 2 走 Eigen `LLT`；0.3.0 起无 R 同款 exact 路径） |
 | 核函数 | `cpp/npfc_kernels.h` | 各核（正态、非中心 t 的 AS-243 级数、Poisson、相关系数、分箱梯形填充）+ `KernelColumnCache`（按 `mu` 缓存整列核值） |
 | 网格/初始化 | `cpp/npfc_grid.h` | R `nspmix` 的移植：`whist` 直方图（diddle 规则）、`initial_npnorm`/`initial_nppois`（直方图式初始混合分布 + `disc` 排序归一）、`gridpoints_npnorm`（数据范围外扩 + 端点，默认 100 点）/`gridpoints_nppois`（sqrt 空间网格） |
 | NNLS | `cpp/npfc_nnls.{h,cpp}` | Lawson–Hanson NNLS（`nnls`）；`pnnlssum`（追加"和为 1"行）；`pnnqp`（大数据 Gram 阵特征分解降维后回退 `pnnlssum`） |
-| 有界 LBFGS | `cpp/LBFGSB.h` + `cpp/LBFGSpp/` | 仅二维族使用（Yixuan Qiu 的 LBFGSB 移植，MIT） |
+| 有界 LBFGS | `cpp/LBFGSB.h` + `cpp/LBFGSpp/` | 仅多元正态族使用（Yixuan Qiu 的 LBFGSB 移植，MIT） |
 | 统计/相关矩阵 | `cpp/npfc_stats.h`、`cpp/npfc_corrmatrix.h` | 特殊函数（`gammln`、`dnt` 常量 `DntConst` 等）、CLL 族相关矩阵工具 |
 
 **线程模型**：包内没有手写 OpenMP 循环。`setup.py` 构建期探测编译器
@@ -246,8 +246,8 @@ d0 的 `dfmin` 比 d1 的 `brmin` 贵：它没有导数，精化每次要在全�
 - `min_gradient`：在**最终密度**上对所有**支撑点**求 gain
   （`gradfunvec(resultpt_, …)` 取最小）——KKT 证书（支撑方向无负
   梯度；收敛解处应 `≥ -1e-4`，parity 门据此设门）；
-- `grid_gain`：同一最终密度上对**全部网格点**求 gain 取最小（2-D
-  族为全部 (G−1)² 格中心，`npfc_fam2d.h`）——网格级证书（精化根只
+- `grid_gain`：同一最终密度上对**全部网格点**求 gain 取最小（N-D
+  正态族为全部 (G−1)^k 格中心，`npfc_famnd.h`）——网格级证书（精化根只
   认证其子区间，网格外方向另行跟踪）。依赖网格分辨率，可合法地略负
   （如 `npnormcvm` −8.2e-4），故对一维族只做**信息性**输出，不设门
   （docs/PERF.md §4c）；2-D 族另有门：`tests/verify_2d_same.py` 在
@@ -315,28 +315,31 @@ d0 的 `dfmin` 比 d1 的 `brmin` 贵：它没有导数，精化每次要在全�
 fresh 列数从"每个候选区间都精化"降到"只在必须时精化"，这是
 0.2.2 → 0.2.3 的主要提速来源（docs/PERF.md §4c 有 A/B 表）。
 
-## 12. 二维族 `npnorm2Dll`（`npfc_fam2d.h`）
+## 12. 多元正态族 `npnormND`（`npfc_famnd.h`）
 
-结构同 §5（solvegrad → computeweights → collapse → 收敛判据），
-差异：
+R `npnorm2Dll` 的 N-D 泛化（0.3.0）：支撑点为 `k × d`（d 维均值，
+d = `k` ≥ 2；绑定名 `npnorm2Dll` 保留为 d = 2 的别名）。结构同 §5
+（solvegrad → computeweights → collapse → 收敛判据），差异：
 
-- 支撑点是 `k × 2` 矩阵（2-D 均值），搜索空间是 2-D 网格；
-- 核 = 2-D 正态，快路径手展开 2×2 Cholesky（与 R `densityND.h`
-  相同的因子取值与逐点运算序，~12 flops + 4 除法/点，无逐点
-  Eigen 调用；`NPFIC_2D_EXACT=1` 可切回 bit-exact 参考路径）；
+- 搜索空间是 d 轴张量积网格：每轴一份 R 同款 1-D marginal
+  （`gridpoints_npnorm`/`initial_npnorm`），逐格对格内 d 维均值跑
+  有界 L-BFGS-B；
+- 核 = d 维正态 `N(μ; x, beta)`：k = 2 保留手展开 2×2 Cholesky 快路径
+  （与 R `densityND.h` 相同的因子取值与逐点运算序，~12 flops + 4 除法/点，
+  无逐点 Eigen 调用，位级不变），k > 2 走 `dnormNDarray` 的 Eigen `LLT`
+  通用路径（0.3.0 起移除了 R 同款 `NPFIC_2D_EXACT` 路径——验收契约
+  已放宽为密度相似 + ll 不劣，不再要求逐位轨迹一致，docs/PERF.md §4a）；
 - 权重子问题用 `LBFGSpp::LBFGSBSolver`（有界 LBFGS，`[0,1]` 约束，
   `max_iterations = max_linesearch = 100`）替代一维族的 NNLS；
-- 快路径（默认）逐格热启动 + `f_stop = 0` 负增益早停：上一轮每格收敛
-  点作为本轮 L-BFGS-B 起点（仍在格内时），负温热根/负网格点一次求值
-  即接受（docs/PERF.md §4a.3）；`NPFIC_2D_EXACT=1` 走原始循环（固定
-  中点、无热启动、无早停）；
-- 快路径用 gain 目标的**真方向导数**：每点梯度贡献按 `1/F_i`
-  （`F_i = dens + precompute`）加权（`Σ_i (t_i/F_i)(μ − x_i)`）；
-  R 移植的无权重形式是未归一化 KDE 的梯度，只有 1/F 近似常数时才是
-  gain 方向导数。目标函数*值*的算术位级不变，exact 路径轨迹不受影响；
-  `LBFGSB.h` 对 `grad·d >= 0`（过期曲率）做 BFGS 历史重置 + 最速下降
-  重启，该守卫在 exact 路径从不触发（docs/PERF.md §4a.4）；
-- `grid_gain` = 最终混合下全部 (G−1)² 格中心的最小 gain（`get_ans`
+- 逐格热启动 + `f_stop = 0` 负增益早停：上一轮每格收敛点作为本轮
+  L-BFGS-B 起点（仍在格内时），负温热根/负网格点一次求值即接受
+  （docs/PERF.md §4a.3）；
+- gain 目标的**真方向导数**：每点梯度贡献按 `1/F_i`
+  （`F_i = dens + precompute`）加权（`Σ_i (t_i/F_i)(μ − x_i)`，B 为
+  k×k 权重矩阵）；R 移植的无权重形式是未归一化 KDE 的梯度，只有
+  1/F 近似常数时才是 gain 方向导数；`LBFGSB.h` 对 `grad·d >= 0`
+  （过期曲率）做 BFGS 历史重置 + 最速下降重启（docs/PERF.md §4a.4）；
+- `grid_gain` = 最终混合下全部 (G−1)^d 格中心的最小 gain（`get_ans`
   计算，与一维族的网格级证书同义；可合法略负，parity 门在 < −1 时
   失败——docs/PERF.md §4a.3）。
 
@@ -352,7 +355,7 @@ fresh 列数从"每个候选区间都精化"降到"只在必须时精化"，这�
 | 结果与证书 | 同上 `finish`（L1032） |
 | Family 接口 | 同上（L69） |
 | 族实现（正态/t/Poisson/CLL/AD/分箱） | `npfc_families.h`（`NpNormLL`/`NpTLL`/… 11 个类） |
-| 二维族 | `npfc_fam2d.h` |
+| 多元正态族（N-D） | `npfc_famnd.h`（`NpNormND`；k = 2 即 R `npnorm2Dll`） |
 | 核 + 列缓存 | `npfc_kernels.h`（`KernelColumnCache` L57） |
 | NNLS / pnnlssum / pnnqp | `npfc_nnls.{h,cpp}` |
 | 网格 / 初始分布 | `npfc_grid.h`（`whist`/`initial_npnorm`/`gridpoints_*`） |

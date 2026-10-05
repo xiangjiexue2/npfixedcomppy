@@ -49,6 +49,9 @@ Implemented families (the ``method`` argument)
 +-------------+----------------------------------------------------------+
 | ``nptllw``   | binned non-central-t kernel; maximum likelihood          |
 +-------------+----------------------------------------------------------+
+| ``npnormND`` | multivariate-normal kernel ``N(x; mu, beta)``, k >= 2;  |
+|             | maximum likelihood; ``data`` (n, k); ``npnorm2Dll`` = k=2 |
++-------------+----------------------------------------------------------+
 
 The binned (``"...w"``) families pre-bin the observations onto the grid
 ``h = 10**order`` (default ``order = -3``, round-down, as in R's ``bin``)
@@ -84,7 +87,8 @@ class Npmix:
     beta : float
         The structural parameter actually used (the normal scale, the t
         degrees of freedom, or the number of observations for the
-        correlation family).
+        correlation family). For the multivariate family (``npnormND``)
+        this is the (k x k) covariance matrix.
     family : str
         Family identifier: ``"npnorm"``, ``"npt"``, ``"npnormc"`` or
         ``"nppois"``.
@@ -230,6 +234,11 @@ def computemixdist(
           observations) must be supplied.
         * ``"nppoisll"`` — Poisson kernel under the maximum likelihood
           (counts).
+        * ``"npnormND"`` — multivariate-normal kernel ``N(x; mu, beta)``
+          for observations of shape (n, k) with k >= 2, maximum
+          likelihood, ``beta`` the k x k covariance. k = 2 is the R
+          ``npnorm2Dll`` family; ``method="npnorm2Dll"`` is accepted as
+          an alias.
     mu0 : array_like of float, optional
         Support points of the fixed components. Default ``[0.0]`` (a
         zero-weight degenerate fixed component at the origin, as in the R
@@ -302,12 +311,12 @@ def computemixdist(
 
     >>> r = computemixdist(x, method="nptll", beta=5, mu0=[-0.5], pi0=[0.3])
     """
-    # The bivariate-normal family takes an (n, 2) data matrix and a 2 x 2
-    # covariance; it runs its own L-BFGS-B support-point search and does not
-    # use the one-dimensional engine's scalar `beta`, so dispatch it before the
-    # one-dimensional `FAMILIES` validation.
-    if method == "npnorm2Dll":
-        return _computemixdist_npnorm2dll(
+    # The multivariate-normal family takes an (n, k) data matrix and a
+    # k x k covariance; it runs its own L-BFGS-B support-point search and
+    # does not use the one-dimensional engine's scalar `beta`, so dispatch
+    # it before the one-dimensional `FAMILIES` validation.
+    if method in ("npnormND", "npnorm2Dll"):
+        return _computemixdist_npnormnd(
             v, mu0=mu0, pi0=pi0, beta=beta, mix=mix, gridpoints=gridpoints,
             tol=tol, maxit=maxit, verbose=verbose,
         )
@@ -346,7 +355,7 @@ def computemixdist(
     return _to_npmix(res)
 
 
-def _computemixdist_npnorm2dll(
+def _computemixdist_npnormnd(
     v: Sequence[float],
     mu0: Optional[Sequence[float]] = None,
     pi0: Optional[Sequence[float]] = None,
@@ -357,34 +366,47 @@ def _computemixdist_npnorm2dll(
     maxit: int = 100,
     verbose: int = 0,
 ) -> Npmix:
-    """R's ``computemixdist.npnorm2Dll`` front-end.
+    """The multivariate-normal family front-end (N dimensions).
 
-    ``v`` is an ``(n, 2)`` array of bivariate observations and ``beta`` the
-    ``2 x 2`` covariance matrix (default the identity). The defaults for
-    ``mu0`` / ``pi0`` / the 2D ``gridpoints`` / the initial mixing
-    distribution are built inside the C++ entry exactly as the R wrapper does
-    (per-marginal ``initial.npnorm`` combined into a tensor product).
+    ``v`` is an ``(n, k)`` array of multivariate observations (k >= 2)
+    and ``beta`` the ``k x k`` covariance matrix (default the identity).
+    The defaults for ``mu0`` / ``pi0`` / the k-D ``gridpoints`` / the
+    initial mixing distribution are built inside the C++ entry exactly as
+    the R ``npnorm2Dll`` wrapper does (per-marginal ``initial.npnorm``
+    combined into a tensor product), generalized to k axes.
+    ``method="npnorm2Dll"`` dispatches here too (k = 2).
     """
     arr = np.ascontiguousarray(v, dtype=float)
     if arr.ndim == 1:
         arr = arr.reshape(-1, 2)
-    if arr.ndim != 2 or arr.shape[1] != 2:
-        raise ValueError("npnorm2Dll expects data of shape (n, 2)")
-    # R defaults: mu0 = matrix(0, 1, 2); pi0 = 0; beta = diag(2).
+    if arr.ndim != 2:
+        raise ValueError("npnormND expects data of shape (n, k)")
+    k = arr.shape[1]
+    if k < 2:
+        raise ValueError("npnormND expects data with at least 2 columns")
+    # R defaults: mu0 = matrix(0, 1, k); pi0 = 0; beta = eye(k).
     mu0f = (
         np.ascontiguousarray(mu0, dtype=float).ravel()
         if mu0 is not None
-        else np.array([0.0, 0.0])
+        else np.zeros(k)
     )
+    if mu0f.size != k:
+        raise ValueError(
+            f"npnormND: mu0 must have {k} entries for data of shape (n, {k})"
+        )
     pi0f = _to_vec(pi0) if pi0 is not None else np.array([0.0])
+    if pi0f.size * k != mu0f.size:
+        raise ValueError(
+            f"npnormND: pi0 must have {mu0f.size // k} entries (one per mu0 point)"
+        )
     beta_m = (
         np.ascontiguousarray(beta, dtype=float)
         if beta is not None
-        else np.eye(2)
+        else np.eye(k)
     )
-    beta_m = np.ascontiguousarray(beta_m, dtype=float).reshape(2, 2).ravel()
+    beta_m = np.ascontiguousarray(beta_m, dtype=float).reshape(k, k).ravel()
     if mix is not None:
-        mp = np.ascontiguousarray(mix["pt"], dtype=float).reshape(-1, 2).ravel()
+        mp = np.ascontiguousarray(mix["pt"], dtype=float).reshape(-1, k).ravel()
         mpr = _to_vec(mix["pr"])
     else:
         mp = np.empty(0)
@@ -394,20 +416,21 @@ def _computemixdist_npnorm2dll(
         if gridpoints is not None
         else np.empty(0)
     )
-    res = _core.npnorm2Dll(
+    if gp.size % k:
+        raise ValueError(
+            f"npnormND: gridpoints must have a multiple of {k} entries"
+        )
+    res = _core.npnormND(
         arr, mu0f, pi0f, beta_m, mp, mpr, gp,
         float(tol), int(maxit), int(verbose),
     )
-    # The 2D family reports its covariance matrix in `beta` and its support
-    # points as (n, 2) — build the Npmix directly rather than via `_to_npmix`
-    # (which coerces `beta` to a scalar).
+    # The multivariate family reports its covariance matrix in `beta` and
+    # its support points as (n, k) — build the Npmix directly rather than
+    # via `_to_npmix` (which coerces `beta` to a scalar).
     return Npmix(
         pt=[list(row) for row in res["pt"]],
         pr=list(res["pr"]),
-        beta=np.array(
-            [[float(res["beta"][0][0]), float(res["beta"][0][1])],
-             [float(res["beta"][1][0]), float(res["beta"][1][1])]]
-        ),
+        beta=np.array(res["beta"]),
         family=str(res["family"]),
         min_gradient=float(res["min_gradient"]),
         grid_gain=float(res.get("grid_gain", float("nan"))),

@@ -49,6 +49,9 @@ Implemented families (``method`` argument)
 +-------------+-------------------------------------------------+
 | ``nptllw``   | non-central-t kernel; MLE (binned)             |
 +-------------+-------------------------------------------------+
+| ``npnormND`` | multivariate-normal kernel ``N(x; mu, beta)``  |
+|             | (data (n, k), k >= 2; MLE; ``npnorm2Dll`` = 2) |
++-------------+-------------------------------------------------+
 
 The binned (``"...w"``, ``order = -k``) families pre-bin the observations
 onto the grid ``h = 10^order`` (round-down, as in the R ``bin``) and are

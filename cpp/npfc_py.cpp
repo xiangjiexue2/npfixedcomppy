@@ -20,7 +20,7 @@
 
 #include "npfc_engine.h"
 #include "npfc_families.h"
-#include "npfc_fam2d.h"
+#include "npfc_famnd.h"
 #include "npfc_grid.h"
 #include "npfc_corrmatrix.h"
 
@@ -914,146 +914,158 @@ py::array_t<double> posteriormean(const std::string& family,
 }
 
 // ---------------------------------------------------------------------------
-// npnorm2Dll (R `computemixdist.npnorm2Dll` + `npnorm2Dll_`)
+// npnormND (R `computemixdist.npnorm2Dll`, generalized to N dimensions)
 //
-// The bivariate-normal mixing family under the maximum likelihood. Unlike the
-// one-dimensional families, the support points are 2-vectors and the
-// new-support-point search is a box-constrained L-BFGS-B run per grid cell,
-// so this entry does NOT go through `MixSolver`; it orchestrates the
-// standalone `npfc::fam::NpNorm2D` solver, building the default 2D grid and
-// the (marginal) initial mixing distribution exactly as the R wrapper does:
-// each marginal column gets its own `gridpoints.npnorm` / `initial.npnorm`
-// (driven by the covariance's diagonal), then the two are combined into a
-// tensor-product 2D grid / init mix. `data` is n x 2 (row-major).
-py::dict npnorm2dll(py::array_t<double> data, py::array_t<double> mu0fixed,
-                    py::array_t<double> pi0fixed, py::array_t<double> beta,
-                    py::array_t<double> initpt, py::array_t<double> initpr,
-                    py::array_t<double> gridpoints, double tol, long maxit,
-                    long verbose) {
-    const std::vector<double> flat = vec_from(data);
-    const Eigen::Index n = static_cast<Eigen::Index>(flat.size() / 2);
-    Eigen::MatrixXd D(n, 2);
-    for (Eigen::Index i = 0; i < n; ++i) {
-        D(i, 0) = flat[2 * static_cast<std::size_t>(i)];
-        D(i, 1) = flat[2 * static_cast<std::size_t>(i) + 1];
-    }
+// The multivariate-normal mixing family under the maximum likelihood.
+// Unlike the one-dimensional families, the support points are k-vectors
+// and the new-support-point search is a box-constrained L-BFGS-B run per
+// cell of the (tensor-product) grid, so this entry does NOT go through
+// `MixSolver`; it orchestrates the standalone `npfc::fam::NpNormND`
+// solver, building the default k-D grid and the (marginal) initial mixing
+// distribution exactly as the R wrapper does: each marginal column gets
+// its own `gridpoints.npnorm` / `initial.npnorm` (driven by the
+// covariance's diagonal), then all are combined into a tensor-product
+// grid / init mix. `data` is (n x k) (row-major); `beta` the (k x k)
+// covariance (row-major). For k == 2 this is the R `npnorm2Dll` entry
+// bit-for-bit (the same default grid / init mix construction, the same
+// cell enumeration and hot path).
+// ---------------------------------------------------------------------------
+// (the row-major (r x c) helper `mat_from_2d` is defined below, together
+// with the public ND kernels — forward-declared here for the entry)
+static Eigen::MatrixXd mat_from_2d(py::array_t<double> a, Eigen::Index r,
+                                   Eigen::Index c);
+
+py::dict npnormnd(py::array_t<double> data, py::array_t<double> mu0fixed,
+                  py::array_t<double> pi0fixed, py::array_t<double> beta,
+                  py::array_t<double> initpt, py::array_t<double> initpr,
+                  py::array_t<double> gridpoints, double tol, long maxit,
+                  long verbose) {
+    const auto di = data.request();
+    const Eigen::Index n = di.shape[0];
+    const Eigen::Index dim = di.shape[1];
+    const Eigen::MatrixXd D = mat_from_2d(data, n, dim);
 
     const std::vector<double> mu0f_v = vec_from(mu0fixed);
-    const Eigen::Index nf = static_cast<Eigen::Index>(mu0f_v.size() / 2);
-    Eigen::MatrixXd mu0fixed_m(nf, 2);
-    for (Eigen::Index i = 0; i < nf; ++i) {
-        mu0fixed_m(i, 0) = mu0f_v[2 * static_cast<std::size_t>(i)];
-        mu0fixed_m(i, 1) = mu0f_v[2 * static_cast<std::size_t>(i) + 1];
-    }
+    const Eigen::Index nf = static_cast<Eigen::Index>(mu0f_v.size() / dim);
+    Eigen::MatrixXd mu0fixed_m(nf, dim);
+    for (Eigen::Index i = 0; i < nf; ++i)
+        for (Eigen::Index c = 0; c < dim; ++c)
+            mu0fixed_m(i, c) =
+                mu0f_v[static_cast<std::size_t>(i) * dim + c];
     const std::vector<double> pi0f_v = vec_from(pi0fixed);
     Eigen::VectorXd pi0fixed_m(nf);
     for (Eigen::Index i = 0; i < nf; ++i)
         pi0fixed_m[i] = pi0f_v[static_cast<std::size_t>(i)];
 
     const std::vector<double> beta_v = vec_from(beta);
-    Eigen::MatrixXd beta_m(2, 2);
-    for (int r = 0; r < 2; ++r)
-        for (int c = 0; c < 2; ++c)
-            beta_m(r, c) = beta_v[r * 2 + c];
+    Eigen::MatrixXd beta_m(dim, dim);
+    for (Eigen::Index r = 0; r < dim; ++r)
+        for (Eigen::Index c = 0; c < dim; ++c)
+            beta_m(r, c) = beta_v[static_cast<std::size_t>(r) * dim + c];
 
     // Marginal columns + unit weights (R: `v1 = npnorm(v[, 1])` → $v, $w = 1).
-    std::vector<double> col1(n), col2(n), w(n, 1.0);
-    for (Eigen::Index i = 0; i < n; ++i) {
-        col1[static_cast<std::size_t>(i)] = D(i, 0);
-        col2[static_cast<std::size_t>(i)] = D(i, 1);
+    std::vector<std::vector<double>> cols(dim);
+    std::vector<double> w(n, 1.0);
+    for (Eigen::Index c = 0; c < dim; ++c) {
+        cols[c].resize(n);
+        for (Eigen::Index i = 0; i < n; ++i)
+            cols[c][static_cast<std::size_t>(i)] = D(i, c);
     }
 
-    // Default 2D grid: R's `cbind(sort(rep(g1, LLL)), sort(rep(g2, LLL)))`.
+    // Default k-D grid: the tensor product of the per-axis
+    // `gridpoints.npnorm`, each axis padded (by repetition) to the
+    // longest axis — the k-D generalization of R's
+    // `cbind(sort(rep(g1, LLL)), sort(rep(g2, LLL)))`.
     Eigen::MatrixXd grid_m;
     const std::vector<double> gp_v = vec_from(gridpoints);
-    if (gp_v.size() >= 4) {
-        const Eigen::Index gm = static_cast<Eigen::Index>(gp_v.size() / 2);
-        grid_m.resize(gm, 2);
-        for (Eigen::Index i = 0; i < gm; ++i) {
-            grid_m(i, 0) = gp_v[2 * static_cast<std::size_t>(i)];
-            grid_m(i, 1) = gp_v[2 * static_cast<std::size_t>(i) + 1];
-        }
+    if (gp_v.size() >= 2 * dim) {
+        grid_m = mat_from_2d(gridpoints,
+                             static_cast<Eigen::Index>(gp_v.size() / dim), dim);
     } else {
-        const std::vector<double> g1 =
-            npfc::grid::gridpoints_npnorm(col1, w, beta_m(0, 0), 100);
-        const std::vector<double> g2 =
-            npfc::grid::gridpoints_npnorm(col2, w, beta_m(1, 1), 100);
-        const std::size_t LLL = std::max(g1.size(), g2.size());
-        auto pad_sort = [](const std::vector<double>& g, std::size_t L) {
+        std::vector<std::vector<double>> gax(dim);
+        std::size_t L = 0;
+        for (Eigen::Index c = 0; c < dim; ++c) {
+            gax[c] = npfc::grid::gridpoints_npnorm(cols[c], w, beta_m(c, c), 100);
+            L = std::max(L, gax[c].size());
+        }
+        auto pad_sort = [](std::vector<double> g, std::size_t L) {
             std::vector<double> out(L);
             for (std::size_t t = 0; t < L; ++t)
                 out[t] = g[t % g.size()];
             std::sort(out.begin(), out.end());
             return out;
         };
-        const std::vector<double> g1s = pad_sort(g1, LLL);
-        const std::vector<double> g2s = pad_sort(g2, LLL);
-        grid_m.resize(static_cast<Eigen::Index>(LLL), 2);
-        for (std::size_t i = 0; i < LLL; ++i) {
-            grid_m(static_cast<Eigen::Index>(i), 0) = g1s[i];
-            grid_m(static_cast<Eigen::Index>(i), 1) = g2s[i];
+        grid_m.resize(static_cast<Eigen::Index>(L), dim);
+        for (Eigen::Index c = 0; c < dim; ++c) {
+            const std::vector<double> gs = pad_sort(std::move(gax[c]), L);
+            for (std::size_t i = 0; i < L; ++i)
+                grid_m(static_cast<Eigen::Index>(i), c) = gs[i];
         }
     }
 
-    // Initial mixing distribution. If the caller supplied a 2D `mix` (initpt
-    // non-empty) use it directly; otherwise build it from the two marginals
-    // (tensor product), mirroring R's `initial.npnorm(v1, beta[1,1], ...)` /
-    // `initial.npnorm(v2, beta[2,2], ...)`.
+    // Initial mixing distribution. If the caller supplied a k-D `mix`
+    // (initpt non-empty) use it directly; otherwise build it from the
+    // marginals (tensor product), mirroring R's per-axis
+    // `initial.npnorm(vc, beta[c,c], ...)` — axis 0 is the fastest index,
+    // as in the 2-D port.
     Eigen::MatrixXd initpt_m;
     Eigen::VectorXd initpr_m;
     const std::vector<double> ipt_v = vec_from(initpt);
-    if (ipt_v.size() >= 4) {
-        const Eigen::Index pm = static_cast<Eigen::Index>(ipt_v.size() / 2);
-        initpt_m.resize(pm, 2);
-        for (Eigen::Index i = 0; i < pm; ++i) {
-            initpt_m(i, 0) = ipt_v[2 * static_cast<std::size_t>(i)];
-            initpt_m(i, 1) = ipt_v[2 * static_cast<std::size_t>(i) + 1];
-        }
+    if (ipt_v.size() >= 2 * dim) {
+        initpt_m = mat_from_2d(initpt,
+                               static_cast<Eigen::Index>(ipt_v.size() / dim),
+                               dim);
         const std::vector<double> pr_v = vec_from(initpr);
         initpr_m.resize(static_cast<Eigen::Index>(pr_v.size()));
         for (std::size_t i = 0; i < pr_v.size(); ++i)
             initpr_m[static_cast<Eigen::Index>(i)] = pr_v[i];
     } else {
-        auto r1 = npfc::grid::initial_npnorm(col1, w, beta_m(0, 0), {}, {});
-        auto r2 = npfc::grid::initial_npnorm(col2, w, beta_m(1, 1), {}, {});
-        const std::vector<double>& a = std::get<1>(r1);
-        const std::vector<double>& pa = std::get<2>(r1);
-        const std::vector<double>& b = std::get<1>(r2);
-        const std::vector<double>& pb = std::get<2>(r2);
-        const std::size_t len1 = a.size(), len2 = b.size();
-        initpt_m.resize(static_cast<Eigen::Index>(len1 * len2), 2);
-        initpr_m.resize(static_cast<Eigen::Index>(len1 * len2));
-        for (std::size_t k = 0; k < len1 * len2; ++k) {
-            const std::size_t i = k % len1;  // index into marginal 1
-            const std::size_t j = k / len1;  // index into marginal 2
-            initpt_m(static_cast<Eigen::Index>(k), 0) = a[i];
-            initpt_m(static_cast<Eigen::Index>(k), 1) = b[j];
-            initpr_m[static_cast<Eigen::Index>(k)] = pa[i] * pb[j];
+        std::vector<std::vector<double>> ax(dim), ap(dim);
+        for (Eigen::Index c = 0; c < dim; ++c) {
+            auto r = npfc::grid::initial_npnorm(cols[c], w, beta_m(c, c), {}, {});
+            ax[c] = std::get<1>(r);
+            ap[c] = std::get<2>(r);
+        }
+        std::size_t total = 1;
+        for (Eigen::Index c = 0; c < dim; ++c)
+            total *= ax[c].size();
+        initpt_m.resize(static_cast<Eigen::Index>(total), dim);
+        initpr_m.resize(static_cast<Eigen::Index>(total));
+        for (std::size_t k = 0; k < total; ++k) {
+            std::size_t rem = k;
+            double pw = 1.0;
+            for (Eigen::Index c = 0; c < dim; ++c) {
+                const std::size_t ic = rem % ax[c].size();
+                rem /= ax[c].size();
+                initpt_m(static_cast<Eigen::Index>(k), c) = ax[c][ic];
+                pw *= ap[c][ic];
+            }
+            initpr_m[static_cast<Eigen::Index>(k)] = pw;
         }
     }
 
-    npfc::fam::NpNorm2D solver(D, mu0fixed_m, pi0fixed_m, beta_m, initpt_m,
+    npfc::fam::NpNormND solver(D, mu0fixed_m, pi0fixed_m, beta_m, initpt_m,
                                initpr_m, grid_m, static_cast<int>(verbose));
     solver.computemixdist(tol, maxit);
-    const npfc::fam::NpNorm2D::Ans a = solver.get_ans();
+    const npfc::fam::NpNormND::Ans a = solver.get_ans();
 
     py::gil_scoped_acquire _acquire;
     py::dict d;
     py::list ptlist;
     for (const auto& row : a.pt) {
-        py::list r2;
-        r2.append(row[0]);
-        r2.append(row[1]);
-        ptlist.append(r2);
+        py::list rk;
+        for (double v : row)
+            rk.append(v);
+        ptlist.append(rk);
     }
     d["pt"] = ptlist;
     d["pr"] = py::cast(a.pr);
     py::list betalist;
     for (const auto& row : a.beta) {
-        py::list r2;
-        r2.append(row[0]);
-        r2.append(row[1]);
-        betalist.append(r2);
+        py::list rk;
+        for (double v : row)
+            rk.append(v);
+        betalist.append(rk);
     }
     d["beta"] = betalist;
     d["family"] = a.family;
@@ -1133,7 +1145,7 @@ PYBIND11_MODULE(_core, m) {
     m.doc() = "npfixedcomppy C++/Eigen core (pybind11)";
     // A callable, matching the PyO3 `version()` entry point the Python
     // front-end (npfc.py) expects.
-    m.def("version", [] { return std::string("0.2.3"); });
+    m.def("version", [] { return std::string("0.3.0"); });
 
     const auto guard = py::call_guard<py::gil_scoped_release>();
     const auto kw = py::kw_only();
@@ -1234,10 +1246,16 @@ PYBIND11_MODULE(_core, m) {
           py::arg("tol"), py::arg("verbose"), py::arg("fast"),
           py::arg("relax"), py::arg("inner_tol"), guard, kw);
 
-    // The bivariate-normal mixing family (R `npnorm2Dll`). `data` is n x 2
-    // (row-major), `beta` the 2 x 2 covariance (row-major), and the
-    // remaining args match the one-dimensional entries.
-    m.def("npnorm2Dll", &npnorm2dll, py::arg("data"), py::arg("mu0fixed"),
+    // The multivariate-normal mixing family (R `npnorm2Dll`, generalized
+    // to N dimensions). `data` is (n x k) (row-major), `beta` the (k x k)
+    // covariance (row-major), and the remaining args match the
+    // one-dimensional entries. `npnormND` is the entry; `npnorm2Dll` is
+    // the R-named alias (k is inferred from the data's shape).
+    m.def("npnormND", &npnormnd, py::arg("data"), py::arg("mu0fixed"),
+          py::arg("pi0fixed"), py::arg("beta"), py::arg("initpt"),
+          py::arg("initpr"), py::arg("gridpoints"), py::arg("tol"),
+          py::arg("maxit"), py::arg("verbose"), guard, kw);
+    m.def("npnorm2Dll", &npnormnd, py::arg("data"), py::arg("mu0fixed"),
           py::arg("pi0fixed"), py::arg("beta"), py::arg("initpt"),
           py::arg("initpr"), py::arg("gridpoints"), py::arg("tol"),
           py::arg("maxit"), py::arg("verbose"), guard, kw);
