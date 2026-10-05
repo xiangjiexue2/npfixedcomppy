@@ -410,6 +410,7 @@ def _computemixdist_npnorm2dll(
         ),
         family=str(res["family"]),
         min_gradient=float(res["min_gradient"]),
+        grid_gain=float(res.get("grid_gain", float("nan"))),
         ll=float(res["ll"]),
         flag=str(res["flag"]),
         iter=int(res["iter"]),

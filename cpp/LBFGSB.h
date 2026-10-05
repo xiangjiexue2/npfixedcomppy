@@ -147,6 +147,15 @@ public:
             return 1;
         }
 
+        // Optional objective-value early stop (npfixedcomppy 2-D
+        // support-point search; NaN = disabled, see LBFGSBParam::f_stop):
+        // any strictly-below-threshold value is already an acceptable
+        // point, so the current x is returned as-is.
+        if(std::isfinite(m_param.f_stop) && fx < m_param.f_stop)
+        {
+            return 1;
+        }
+
         // Compute generalized Cauchy point
         Vector xcp(n), vecc;
         IndexSet newact_set, fv_set;
@@ -173,6 +182,26 @@ public:
             m_xp.noalias() = x;
             m_gradp.noalias() = m_grad;
 
+            // Descent-direction guard (npfixedcomppy 2-D fast path).
+            // The BFGS direction is a descent direction only while the
+            // curvature history (s, y) reflects the SAME gradient the run
+            // started with; with the true gain gradient the history can
+            // go stale and the Cauchy / subspace direction stops
+            // descending, which made the line search throw ("the moving
+            // direction does not decrease the objective function value").
+            // Standard L-BFGS-B remedy: restart the BFGS history and take
+            // the steepest-descent direction, which descends whenever
+            // grad != 0 (guaranteed here: the convergence test above
+            // returned only for projgnorm <= epsilon, and projgnorm <=
+            // ||grad||). With the unweighted (R-identical / exact)
+            // gradient the direction always descended, so this guard never
+            // fires there and that trajectory is preserved bit-for-bit.
+            if(m_grad.dot(m_drt) >= 0.0)
+            {
+                m_bfgs.reset(n, m_param.m);
+                m_drt.noalias() = -m_grad;
+            }
+
             // Line search to update x, fx and gradient
             Scalar step_max = max_step_size(x, m_drt, lb, ub);
             step_max = std::min(m_param.max_step, step_max);
@@ -182,6 +211,13 @@ public:
 
             // New projected gradient norm
             projgnorm = proj_grad_norm(x, m_grad, lb, ub);
+
+            // Objective-value early stop (see the initial check above):
+            // the line search above produced a new (x, fx) pair.
+            if(std::isfinite(m_param.f_stop) && fx < m_param.f_stop)
+            {
+                return k;
+            }
 
             /* std::cout << "** Iteration " << k << std::endl;
             std::cout << "   x = " << x.transpose() << std::endl;

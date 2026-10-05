@@ -5,6 +5,8 @@
 #define PARAM_H
 
 #include <Eigen/Core>
+#include <cmath>    // std::isfinite (f_stop validation)
+#include <limits>   // std::numeric_limits (f_stop default)
 #include <stdexcept>  // std::invalid_argument
 
 
@@ -320,6 +322,19 @@ public:
     /// the \ref ftol parameter and smaller than \c 1.0.
     ///
     Scalar wolfe;
+    ///
+    /// Optional objective-value early stop (npfixedcomppy addition, not
+    /// part of the upstream LBFGSpp API): when finite, the minimization
+    /// returns as soon as any evaluated objective value drops STRICTLY
+    /// below this value, keeping the current point as the result. NaN
+    /// (the default) disables the check — the upstream behavior.
+    ///
+    /// The npfixedcomppy 2-D support-point search sets this to 0: any
+    /// NEGATIVE gain is already a valid new support point (the caller
+    /// re-solves the constrained weights), so refining the exact cell
+    /// minimum is wasted work (docs/SOLVE.md, docs/PERF.md §4a.3).
+    ///
+    Scalar f_stop;
 
 public:
     ///
@@ -340,6 +355,7 @@ public:
         max_step       = Scalar(1e+20);
         ftol           = Scalar(1e-4);
         wolfe          = Scalar(0.9);
+        f_stop         = std::numeric_limits<Scalar>::quiet_NaN();
     }
 
     ///
@@ -373,6 +389,9 @@ public:
             throw std::invalid_argument("'ftol' must satisfy 0 < ftol < 0.5");
         if(wolfe <= ftol || wolfe >= 1)
             throw std::invalid_argument("'wolfe' must satisfy ftol < wolfe < 1");
+        if(std::isinf(f_stop))
+            throw std::invalid_argument(
+                "'f_stop' must be a finite value or NaN (disabled)");
     }
 };
 

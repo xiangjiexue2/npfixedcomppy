@@ -246,10 +246,14 @@ d0 的 `dfmin` 比 d1 的 `brmin` 贵：它没有导数，精化每次要在全�
 - `min_gradient`：在**最终密度**上对所有**支撑点**求 gain
   （`gradfunvec(resultpt_, …)` 取最小）——KKT 证书（支撑方向无负
   梯度；收敛解处应 `≥ -1e-4`，parity 门据此设门）；
-- `grid_gain`：同一最终密度上对**全部网格点**求 gain 取最小——
-  网格级证书（精化根只认证其子区间，网格外方向另行跟踪）。依赖
-  网格分辨率，可合法地略负（如 `npnormcvm` −8.2e-4），故只做
-  **信息性**输出，不设门（docs/PERF.md §4c）；
+- `grid_gain`：同一最终密度上对**全部网格点**求 gain 取最小（2-D
+  族为全部 (G−1)² 格中心，`npfc_fam2d.h`）——网格级证书（精化根只
+  认证其子区间，网格外方向另行跟踪）。依赖网格分辨率，可合法地略负
+  （如 `npnormcvm` −8.2e-4），故对一维族只做**信息性**输出，不设门
+  （docs/PERF.md §4c）；2-D 族另有门：`tests/verify_2d_same.py` 在
+  `grid_gain < −1` 时失败——大负值是 FAST 目标按行主序误读 `(n, 2)`
+  数据（损坏数据集）的特征，similarity 门抓不到它（docs/PERF.md
+  §4a.3）；
 - `ll`：最终损失的报告值（`lossfunction(dens) + extrafun()`）；
 - `iter`、`convergence`、`flag`、`beta`、`family`。
 
@@ -322,7 +326,19 @@ fresh 列数从"每个候选区间都精化"降到"只在必须时精化"，这�
   Eigen 调用；`NPFIC_2D_EXACT=1` 可切回 bit-exact 参考路径）；
 - 权重子问题用 `LBFGSpp::LBFGSBSolver`（有界 LBFGS，`[0,1]` 约束，
   `max_iterations = max_linesearch = 100`）替代一维族的 NNLS；
-- `grid_gain` 留 NaN（搜索空间是 2-D 网格，一维网格证书不适用）。
+- 快路径（默认）逐格热启动 + `f_stop = 0` 负增益早停：上一轮每格收敛
+  点作为本轮 L-BFGS-B 起点（仍在格内时），负温热根/负网格点一次求值
+  即接受（docs/PERF.md §4a.3）；`NPFIC_2D_EXACT=1` 走原始循环（固定
+  中点、无热启动、无早停）；
+- 快路径用 gain 目标的**真方向导数**：每点梯度贡献按 `1/F_i`
+  （`F_i = dens + precompute`）加权（`Σ_i (t_i/F_i)(μ − x_i)`）；
+  R 移植的无权重形式是未归一化 KDE 的梯度，只有 1/F 近似常数时才是
+  gain 方向导数。目标函数*值*的算术位级不变，exact 路径轨迹不受影响；
+  `LBFGSB.h` 对 `grad·d >= 0`（过期曲率）做 BFGS 历史重置 + 最速下降
+  重启，该守卫在 exact 路径从不触发（docs/PERF.md §4a.4）；
+- `grid_gain` = 最终混合下全部 (G−1)² 格中心的最小 gain（`get_ans`
+  计算，与一维族的网格级证书同义；可合法略负，parity 门在 < −1 时
+  失败——docs/PERF.md §4a.3）。
 
 ## 13. 文件与符号速查
 

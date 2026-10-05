@@ -272,12 +272,13 @@ the LL-style sweep.
 
 The 2-D experimental family is still the one documented case where this
 port is slower than R. Two fast paths — a hand-unrolled 2×2 density
-kernel and an explicit-inverse objective (§4a.2, the default) — closed
-most of the old ~28× gap on the reference run:
+kernel and an explicit-inverse objective (§4a.2, the default) — plus
+the per-cell hot start (§4a.3) and the true directional derivative
+(§4a.4) closed the old ~28× gap to ~1.3× on the reference run:
 
 | case (same machine, same data n=300, same initial mix & grid) | `npfixedcomppy` | R | ratio |
 |---|---|---|---|
-| 2-D n=300, fast path (default) | ≈ 2.7 s (median of 5) | ≈ 0.75 s (best of 3) | ~3.5× slower |
+| 2-D n=300, fast path (default) | ≈ 0.95 s (median of 5) | ≈ 0.75 s (best of 3) | ~1.3× slower |
 | 2-D n=300, R-identical path (`NPFIC_2D_EXACT=1`) | ≈ 4.3 s (median of 5) | — | — |
 
 Verified decomposition (this build):
@@ -305,35 +306,55 @@ Verified decomposition (this build):
   848.747282034907) — both cross-evaluations match an independent
   numpy recomputation to < 1e-12. The kernel fast path itself is
   bit-exact: with `NPFIC_2D_EXACT=1` the fit reproduces the
-  pre-objective-fast-path build's ll / iteration trajectory bit-for-bit.
-  The **default** fast objective path (§4a.2) differs from that
-  trajectory by ~1e-13 in the objective values (ll 848.7611702303334
-  on the reference run) and accepts a slightly different cell set on
-  some data.
+  pre-objective-fast-path build's ll / iteration trajectory
+  bit-for-bit. The **default** fast objective path (§4a.2) differs
+  from that trajectory by ~1e-13 in the objective values (ll
+  848.7472072261477 on the reference run) and, through its hot-start +
+  negative-gain early-stop search (§4a.3) and its true directional
+  derivative (§4a.4), accepts a ≈ 1.9× smaller cell set (216,955 vs
+  421,810 objective evaluations on the reference run).
 * **The remaining cost is the L-BFGS-B support-point search.** The
   family runs one box-constrained L-BFGS-B problem per grid cell
   (103 × 103 = 10,609 sub-problems per outer iteration × 6 iterations)
   plus a weight subproblem and a collapse per iteration. The per-cell
   early-exit (`projgnorm ≤ ε` on the initial midpoint, executed on the
   first evaluation) is what makes most cells cheap; the cost is the
-  non-exit cells. On the n=300 reference run `NPFIXEDCOMPY_PROFILE=1`
-  reports `objevals=421810` for **both** objective paths — the
-  trajectories there accept the same cells, and the whole 4.3 s →
-  2.7 s gain is the per-evaluation kernel cost (≈ 10.1 µs exact →
-  ≈ 6.3 µs fast, §4a.2). On the second n=300 benchmark the ~1e-13
-  kernel difference *does* flip the near-zero per-cell objective signs
-  of a few cells, the accepted set changes, and the evaluation count
-  itself drops 769,533 → 251,704 (wall 7.0 s → 2.5 s).
+  non-exit cells. `NPFIXEDCOMPY_PROFILE=1` on the n=300 reference run
+  reports `objevals=421810` for the R-identical loop and
+  `objevals=216955` for the default fast path — the hot-start +
+  negative-gain early-stop search (§4a.3) and the true directional
+  derivative (§4a.4) together accept a ≈ 1.9× smaller cell set. The
+  4.3 s → 0.95 s end-to-end gain is the product of the per-evaluation
+  kernel cost (≈ 10.2 µs exact → ≈ 4.4 µs fast) and the ~1.9× fewer
+  cell evaluations. On the second n=300 benchmark the same split holds
+  (769,533 → 316,253 evaluations, wall 8.0 s → 1.7 s).
 * **The result is a valid — in the reference run, slightly better —
   local optimum, on both objective paths.** The search accepts a grid
   cell only on a *strictly* negative objective, which is exquisitely
   sensitive to the floating-point trajectory; both paths converge
-  deterministically in 6 iterations: exact path NLL 848.747282034907,
-  fast path 848.7611702303334, R's 848.88775287688986 (lower is
-  better). The main components of the two PY mixtures agree within
-  ≈ 0.06 in location. `tests/verify_2d_same.py` pins all of this as the
-  family's gate (per-path determinism, ll bands, kernel parity vs R,
-  and fast-vs-exact mixture similarity).
+  deterministically (exact 6 iterations, fast 10): exact path NLL
+  848.747282034907, fast path 848.7472072261477, R's
+  848.88775287688986 (lower is better). After the column-major
+  data-read fix (§4a.3) and the true directional derivative (§4a.4)
+  the main components of the two PY mixtures agree within ≈ 0.007 in
+  location on the reference run.
+  `tests/verify_2d_same.py` pins all of this as the family's gate
+  (per-path determinism, ll bands, kernel parity vs R, fast-vs-exact
+  mixture similarity, and the grid-level certificate below).
+* **The grid-level certificate (`grid_gain`) caught a real defect and
+  now guards the path.** `get_ans` reports `grid_gain`, the minimum of
+  the gain over ALL (G−1)² cell midpoints at the final mixture — the
+  exact zero-cost candidate set the search itself starts each cell
+  from. At the reference fit the corrected paths give `grid_gain`
+  ≈ +4.7e-3 (fast) and +2.7e-7 (exact), both non-negative with 0
+  negative cells, and an independent numpy recomputation from the
+  public kernels matches the C++ value to < 1e-13. A *large* negative
+  `grid_gain` means the objective was being evaluated on a corrupted
+  dataset — the signature of the column-major/row-major data-read bug
+  (§4a.3), which the certificate exposed (`grid_gain` ≈ −518, 3586
+  negative cells) before the fix. The parity gate now fails on
+  `grid_gain < −1`; small negatives (≈ 1e-3) are the documented
+  early-stop hot-start artifact and are acceptable.
 
 This is inherited algorithmic structure, not a port defect: the R
 package documents `npnorm2Dll` as *experimental and possibly very slow*,
@@ -344,10 +365,10 @@ floating-point trajectory of the support-point search — which the old
 match-to-R contract forbade — and is only the default now because the
 contract was relaxed to *similar result, faster wall time* (the
 R-identical path remains available via `NPFIC_2D_EXACT=1`). The
-remaining ~3.5× gap is the per-cell L-BFGS-B evaluation cost itself
-(421,810 objective evaluations at ≈ 6.3 µs on the reference run —
-251,704 at ≈ 9.9 µs on the second benchmark), which §4a.1 concludes
-no faster *and* similar-result solver can reduce.
+remaining ~1.3× gap (vs R) is the per-cell L-BFGS-B evaluation cost
+itself (216,955 objective evaluations at ≈ 4.4 µs on the reference
+run — 316,253 at ≈ 5.5 µs on the second benchmark), which §4a.1
+concludes no faster *and* similar-result solver can reduce.
 
 #### 4a.1 Solver replacement evaluated: CppNumericalSolvers, NLopt, and a wider sweep
 
@@ -467,41 +488,135 @@ for n = 2 (it is the only caller of the full gradient pair):
 
   | | fast path (default) | exact path (`NPFIC_2D_EXACT=1`) |
   |---|---|---|
-  | wall (median of 5) | 2654 ms | 4252 ms |
-  | objective evaluations | 421,810 | 421,810 |
-  | per-evaluation | ≈ 6.3 µs | ≈ 10.1 µs |
-  | ll / iters / components | 848.7611702303334 / 6 / 5 | 848.7472820349071 / 6 / 5 |
+  | wall (median of 5) | 950 ms | 4295 ms |
+  | objective evaluations | 216,955 | 421,810 |
+  | per-evaluation | ≈ 4.4 µs | ≈ 10.2 µs |
+  | ll / iters / components | 848.7472072261477 / 10 / 5 | 848.7472820349071 / 6 / 5 |
 
-  The two trajectories accept the **same cells** there, so the entire
-  gain is the per-evaluation kernel cost (0 divisions, no heap
-  temporaries, cached invariants — ≈ 1.6×).
+  On the reference run the fast path's gain (≈ 4.5× wall) is the
+  product of the per-evaluation kernel cost (0 divisions, no heap
+  temporaries, cached invariants — ≈ 2.3×) and the ≈ 1.9× smaller
+  per-cell evaluation work (hot start + negative-gain early stop,
+  §4a.3, plus the true directional derivative, §4a.4).
 * **Second n=300 benchmark** (`itercmp/iterdata_2d.csv`):
 
   | | fast path | exact path |
   |---|---|---|
-  | wall | ≈ 2.5 s | ≈ 7.0 s |
-  | objective evaluations | 251,704 | 769,533 (3.1×) |
-  | per-evaluation | ≈ 9.9 µs | ≈ 9.1 µs |
-  | ll / iters / components | 983.1383384870023 / 8 / 6 | 982.7562335069146 / 9 / 7 |
+  | wall | ≈ 1.7 s | ≈ 8.0 s |
+  | objective evaluations | 316,253 | 769,533 (2.4×) |
+  | per-evaluation | ≈ 5.5 µs | ≈ 10.4 µs |
+  | ll / iters / components | 982.7545058419914 / 14 / 7 | 982.7562335069146 / 9 / 7 |
 
-  Here the ~1e-13 kernel difference flips the near-zero per-cell
-  objective signs of a few cells, the accepted set changes, and the
-  wall-time gain is the **evaluation count** (2.8× = 3.1× fewer
-  evaluations; per-evaluation cost ≈ unchanged). Per-evaluation
-  figures include the per-cell L-BFGSpp machinery and vary ≈ ±10 %
-  between runs.
-* **Similarity, measured (both datasets, default grid/init/tol):**
-  reference run — both paths 6 iters on the same cell set, main
-  components (weight ≥ 0.02) within 0.057 in location, |Δll| =
-  0.0139; iterdata benchmark — fast ll 983.1383384870023, 8 iters,
-  6 components vs exact ll 982.7562335069146, 9 iters, 7 components
-  (fast drops one w≈0.02 minor component; both are valid and beat
-  R 1.1.0003's 986.236 on that data). The parity gate now checks
-  similarity (per-path determinism, iter count, ll bands, kernel
-  parity vs R, main-component proximity) rather than bit-identity.
+  Here the wall-time gain (≈ 4.6×) is the product of the per-evaluation
+  fast kernel (≈ 10.4 → ≈ 5.5 µs, ≈ 1.9×) and the ≈ 2.4× fewer
+  evaluations from the hot start and the true directional derivative
+  (§4a.3, §4a.4). Per-evaluation figures include the per-cell L-BFGSpp
+  machinery and vary ≈ ±10 % between runs.
+* **Similarity, measured (both datasets, default grid/init/tol,
+  post-fix, true directional derivative):** reference run — exact
+  6 iters, fast 10, both 5 components; main components (weight ≥
+  0.02) within 0.0066 in location, |Δll| = 7.5e-5; iterdata benchmark
+  — exact 9 iters, fast 14, both 7 components, main components within
+  0.027, |Δll| = 1.7e-3 (both paths beat R 1.1.0003's 986.236 on
+  that data). The parity gate now checks similarity (per-path
+  determinism, iter count, ll bands, kernel parity vs R,
+  main-component proximity) plus the grid-level certificate
+  `grid_gain > −1` (§4a.3) rather than bit-identity.
 * **Escape hatch.** `NPFIC_2D_EXACT=1` restores the original
   Cholesky-based kernel — the bit-exact 0.2.1 trajectory — at the old
   cost.
+
+#### 4a.3 The per-cell hot start and the `grid_gain` certificate (new since 0.2.3)
+
+The 2-D engine launches one L-BFGS-B problem **per grid cell** (103 ×
+103 = 10,609 cells per sweep for the default 104 × 104 grid),
+originally started from the cell midpoint every sweep. This build adds
+two mechanisms:
+
+* **Warm roots + the `f_stop` early exit.** The previous `solvegrad`
+  call's converged point for a cell (keyed by grid position, persistent
+  across calls — every cell is visited on every sweep) is reused as
+  the next call's start when it is still inside the cell. The objective
+  hook `f_stop = 0` makes the *first* evaluation of that point also the
+  acceptance test: a warm root that re-verifies still negative is
+  accepted at one evaluation (the grid evaluation and the acceptance
+  that used to surround it collapse into it), and its warm entry is
+  dropped so the next call restarts from the midpoint — the zero-cost
+  negative-point acceptance of §4c, generalized to per-cell minima.
+  A converged non-negative warm root is a safe hot start (re-verified
+  at one evaluation). Measured effect (jointly with the true
+  directional derivative, §4a.4): the per-sweep accepted-cell work
+  drops 421,810 → 216,955 objective evaluations on the reference run
+  (1.9×) and 769,533 → 316,253 on the second benchmark (2.4×).
+* **The `grid_gain` certificate caught a real defect.** The 0.2.3
+  FAST objective had read the `(n, 2)` data **row-major**
+  (`data_[2*i]`, `data_[2*i+1]`) while Eigen stores it **column-major**
+  — it optimized the objective on a *corrupted dataset* (consecutive
+  x-values paired as `(x, y)` coordinates). The `grid_gain` certificate
+  reported by `get_ans` exposed it: ≈ −518 with 3,586 negative cells on
+  the reference fit, versus ≈ +4.7e-3 with 0 negative cells once the
+  two columns are read correctly (`data_.col(0)` / `data_.col(1)`;
+  the pre-true-gradient build gave +7.2e-7).
+  The family's similarity band (`dmu < 0.08`) would have *missed* the
+  defect — the corrupted fit's main components still landed within
+  ≈ 0.06 of the exact path's — so `tests/verify_2d_same.py` now also
+  fails on `grid_gain < −1`. Post-fix, the independent numpy
+  recomputation of the certificate (from the public kernels, all
+  (G−1)² cell midpoints) matches the C++ value to < 1e-13 on both
+  paths (FAST +4.7e-3, EXACT +2.7e-7 on the reference fit).
+* **A 2-D kernel-column cache was evaluated and rejected.** The 1-D
+  engine's column cache (§3) works because its support roots lie on a
+  precomputable grid+refinement set; the 2-D cells are 2-D regions and
+  L-BFGS-B's line search evaluates arbitrary *interior* points, so a
+  per-cell column cache would cover only a small fraction of the
+  evaluations. The per-evaluation fast kernel (§4a.2) is the 2-D
+  answer instead.
+
+#### 4a.4 The true directional derivative (new in the current build)
+
+The 2-D objective is the *gain* of the cell,
+`g(μ) = (dens(μ) − K(μ)) / F` with `K` the unnormalised KDE
+(`s·Σ_i N(x_i; μ, β)`) and `F = dens + precompute` (constant in μ).
+L-BFGS-B needs the directional derivative of `g` along its search
+direction. The R package — and the original 2-D port of it — instead
+passes `B·Σ_i t_i(μ − x_i) = −∇_μ K(μ)`: the gradient of the
+unnormalised KDE, not of the gain. That is proportional to `∇_μ g`
+only when `1/F` is ~constant over the data; in general L-BFGS-B was
+following *KDE directions* of the gain objective. The 1-D `d1`
+families do it right — their `a1` IS `dg/dμ` (each point weighted by
+`1/F_i`), which is what makes their `brmin`/`dfmin` true derivative
+methods.
+
+The FAST `operator()` now accumulates the weighted sum `Σ_i
+(t_i/F_i)(μ − x_i)` instead (≈ 3 extra FLOPs per point in pass 3 —
+`t_i` and `1/F_i` are already hot from the objective pass); the
+OBJECTIVE arithmetic (`ansd0`) is left bit-identical, so every
+value-based decision (`fval < 0`, `f_stop`, `grid_gain`) is
+unchanged. The exact path (`NPFIC_2D_EXACT=1`) keeps the original
+Cholesky `gradfun`, and its trajectory is bit-identical to the
+pre-change build.
+
+Two effects:
+
+* **The trajectory changes (for the better).** The search now descends
+  the true objective: the reference fit moves from ll
+  848.7479272517137 (6 iters) to ll 848.7472072261477 (10 iters) —
+  *closer* to the exact path (|Δll| vs the exact
+  848.7472820349071: 6.4e-4 → 7.5e-5) — and the per-cell evaluation
+  work drops with it (216,955 vs the pre-change 352,940 on the
+  reference run; 316,253 vs 642,681 on the second benchmark).
+* **A stale-curvature guard in `LBFGSB.h`.** With a gradient that no
+  longer equals −∇K, the BFGS curvature history can go stale and the
+  Cauchy/subspace direction stops descending, which made the line
+  search throw ("the moving direction does not decrease the objective
+  function value"). The standard L-BFGS-B remedy is applied: when
+  `grad·d >= 0` the BFGS history is reset and the steepest-descent
+  direction is taken (which descends whenever `grad != 0`, guaranteed
+  here because the convergence test returns only for
+  `projgnorm <= epsilon <= ||grad||`). With the unweighted
+  (exact / R-identical) gradient the direction always descended, so
+  the guard never fires there and that trajectory is preserved
+  bit-for-bit.
 
 ### 4b. Support-point hot start (the `NPFIC_WARM` experiment; the knob
 was removed in 0.2.3 — see §4c)

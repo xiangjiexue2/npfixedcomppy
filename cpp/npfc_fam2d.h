@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -298,11 +299,27 @@ public:
     //     the kernel path uses (an elementwise scalar `std::exp` drifts
     //     by 1 ulp and was rejected during development).
     //
+    // The returned gradient is the TRUE directional derivative of the
+    // returned objective. The objective is the linearised loss increment
+    //   g(mu) = sum_i (dens_i - t_i(mu)) / F_i,  F_i = dens_i + pre_i,
+    // so  dg/dmu_k = sum_i (t_i / F_i)(mu_k - x_ik), beta^-1 applied at
+    // the end — each point's contribution is weighted by 1/F_i. The
+    // R-ported `gradfun` (and the `NPFIC_2D_EXACT=1` path) returns the
+    // UNWEIGHTED `sum_i t_i (mu - x_i) beta^-1` instead: that is
+    // -grad(K), K = scale * sum_i N(x_i; mu, beta) — the gradient of the
+    // unnormalised KDE, which only aligns with g's gradient when 1/F_i
+    // is ~constant over the data. 1-D's `d1` families weight by 1/F_i
+    // (their `a1` IS dg/dmu, which is what makes `brmin`/`dfmin` true
+    // derivative methods); the 2-D port did not, so L-BFGS-B was
+    // following KDE directions of the gain objective. Weighting costs
+    // one multiply per point in pass 3; the OBJECTIVE arithmetic above
+    // (ansd0) is left bit-identical, so every value-based decision
+    // (accept / f_stop / grid_gain) is unchanged.
+    //
     // `gradfun` keeps the original Cholesky-based kernel for the remaining
-    // (non-hot) callers (`gradfunvec` at `get_ans`); the two are
-    // numerically identical to ~1e-13 relative, which cannot change a
-    // cell's accept/reject decision in practice (A/B measured: same
-    // iters/support/ll on the benchmark datasets).
+    // (non-hot) callers (`gradfunvec` at `get_ans`, the `min_gradient`
+    // certificate, and the exact path); the two are numerically
+    // identical to ~1e-13 relative on the VALUE.
     double operator()(const Eigen::VectorXd& x, Eigen::VectorXd& grad) const {
         if (std::getenv("NPFIXEDCOMPY_PROFILE") != nullptr)
             ++objevals_;
@@ -318,7 +335,17 @@ public:
             return ansd0;
         }
         const double m0 = x[0], m1 = x[1];
-        const double* xd = data_.data();
+        // COLUMN-major (n x 2): the x coordinate is the first column and
+        // the y coordinate the second — NOT interleaved. The previous
+        // `data_.data()[2*i]` / `[2*i+1]` read assumed row-major layout,
+        // which pairs consecutive x's (and later consecutive y's) as
+        // (x, y) coordinates: the fast path was minimizing the objective
+        // of a GARBAGE dataset (measured: certificate gain -518 at the
+        // final fit, while the correct-data gain is -8.8, and the whole
+        // mixture was a fit to the corrupted data). The R port reads via
+        // `x(i, 0)` / `x(i, 1)`; the two column pointers do the same.
+        const double* xd0 = data_.col(0).data();
+        const double* xd1 = data_.col(1).data();
         const double* dd = dens_.data();
         const double* fd = fullden_.data();
         double* qb = buf_q_.data();
@@ -326,8 +353,8 @@ public:
         // The quadratic form uses the explicit inverse (0 divisions):
         // d^T beta^-1 d = inv00*d0^2 + (inv01+inv10)*d0*d1 + inv11*d1^2.
         for (Eigen::Index i = 0; i < len_; ++i) {
-            const double d0 = xd[2 * i] - m0;
-            const double d1 = xd[2 * i + 1] - m1;
+            const double d0 = xd0[i] - m0;
+            const double d1 = xd1[i] - m1;
             const double quad =
                 inv00_ * d0 * d0 + (inv01_ + inv10_) * d0 * d1 +
                 inv11_ * d1 * d1;
@@ -338,12 +365,16 @@ public:
         tm = Eigen::Map<const Eigen::VectorXd>(qb, len_).array().exp() *
              scale_;
         // Pass 3: the three scalar reductions, one fused loop, no heap.
+        // The gradient accumulates the WEIGHTED sums q_i = t_i * fd[i]
+        // (see the true-gradient note above); ansd0 itself keeps the
+        // original unweighted product (dens - t) * fd, bit-identical.
         const double* tb = buf_t_.data();
         double s0 = 0.0, s1 = 0.0, ansd0 = 0.0;
         for (Eigen::Index i = 0; i < len_; ++i) {
             const double t = tb[i];
-            s0 += (m0 - xd[2 * i]) * t;
-            s1 += (m1 - xd[2 * i + 1]) * t;
+            const double q = t * fd[i];
+            s0 += (m0 - xd0[i]) * q;
+            s1 += (m1 - xd1[i]) * q;
             ansd0 += (dd[i] - t) * fd[i];
         }
         // ansd1 = [s0 s1] * beta^-1 (beta^-1 from the explicit inverse;
@@ -353,31 +384,118 @@ public:
         return ansd0;
     }
 
-    // New-support-point search: box-constrained L-BFGS-B from the midpoint of
-    // every grid cell; keep the cells whose objective is negative (port of
-    // the R `solvegrad`).
+    // New-support-point search (2-D port of the 1-D 0.2.3 relaxed search,
+    // docs/PERF.md §4a.3). For every grid cell the L-BFGS-B run starts
+    // from the PREVIOUS call's refined point for that cell (the CNM
+    // working-set hot start, the 2-D analog of the 1-D
+    // `warm_root_d1_`/`warm_root_d0_` arrays) when it is still inside the
+    // cell, else from the cell midpoint (the original R/0.2.1 start).
+    // `minimize` evaluates its start point FIRST, and the objective-value
+    // early stop `f_stop = 0` (the 2-D analog of the 1-D negative-gain
+    // early stop in `brmin`/`dfmin`) makes it return IMMEDIATELY when
+    // that gain — or any later evaluated gain — is negative: a negative
+    // grid point costs exactly ONE evaluation and is accepted as-is (the
+    // weights are re-solved by `computeweights` anyway), and a cell whose
+    // refined point re-verifies negative skips the search entirely. No
+    // cell ever costs more evaluations than the original loop, because
+    // the start point is either the original midpoint or a hot start.
+    // WARM-ROOT POLICY: a run terminated by the early stop returns the
+    // first NEGATIVE point, not a minimum — storing it as the next call's
+    // start lets the per-cell local search converge to a positive local
+    // minimum and MISS a negative region (measured: grid_gain = -518 at
+    // the final fit vs +2.7e-7 for the original loop). So early-stopped
+    // runs DROP their entry (the next call restarts from the midpoint —
+    // the original behavior), and only a CONVERGED non-negative minimum
+    // is stored: the next call's start is then always either the original
+    // midpoint or a verified minimum, and no cell ever costs more
+    // evaluations than the original loop.
+    // `NPFIC_2D_EXACT=1` runs the ORIGINAL loop (L-BFGS-B from the fixed
+    // midpoint, no hot start, no early stop) — the bit-exact 0.2.1
+    // trajectory.
     Eigen::MatrixXd solvegrad(const Eigen::VectorXd& dens, double tol) const {
+        setdens(dens);
+        const Eigen::Index G = gridpoints_.rows();
+        if (exact2d_) {
+            Eigen::MatrixXd ans(0, 2);
+            double fval;
+            Eigen::VectorXd xval(2), lb(2), ub(2);
+            LBFGSpp::LBFGSBParam<double> param;
+            param.epsilon = tol;
+            param.max_linesearch = 100;
+            param.max_iterations = 100;
+            LBFGSpp::LBFGSBSolver<double> solver(param);
+            for (Eigen::Index i = 0; i < G - 1; ++i) {
+                for (Eigen::Index j = 0; j < G - 1; ++j) {
+                    lb[0] = gridpoints_(i, 0);
+                    lb[1] = gridpoints_(j, 1);
+                    ub[0] = gridpoints_(i + 1, 0);
+                    ub[1] = gridpoints_(j + 1, 1);
+                    xval = (lb + ub) * 0.5;
+                    solver.minimize(*this, xval, fval, lb, ub);
+                    if (fval < 0.0) {
+                        ans.conservativeResize(ans.rows() + 1, 2);
+                        ans.bottomRows(1) = xval.transpose();
+                    }
+                }
+            }
+            return ans;
+        }
+        // Fast path (see the comment above): hot start + grid eval with
+        // the negative-gain early stop `f_stop = 0`.
         Eigen::MatrixXd ans(0, 2);
         double fval;
-        Eigen::VectorXd xval(2), lb(2), ub(2);
         LBFGSpp::LBFGSBParam<double> param;
         param.epsilon = tol;
         param.max_linesearch = 100;
         param.max_iterations = 100;
+        param.f_stop = 0.0;
         LBFGSpp::LBFGSBSolver<double> solver(param);
-        setdens(dens);
-        const Eigen::Index G = gridpoints_.rows();
+        const std::size_t Gm = static_cast<std::size_t>(G - 1);
+        // `warm_2d_` PERSISTS across calls (no clear): every cell is
+        // visited on every sweep, so each entry is overwritten in place —
+        // the 1-D arrays are updated the same way (a root that
+        // re-verifies negative is accepted at one evaluation, a stale
+        // one just serves as a cheaper L-BFGS-B start).
         for (Eigen::Index i = 0; i < G - 1; ++i) {
             for (Eigen::Index j = 0; j < G - 1; ++j) {
+                const std::size_t key =
+                    static_cast<std::size_t>(i) * Gm +
+                    static_cast<std::size_t>(j);
+                Eigen::VectorXd lb(2), ub(2);
                 lb[0] = gridpoints_(i, 0);
                 lb[1] = gridpoints_(j, 1);
                 ub[0] = gridpoints_(i + 1, 0);
                 ub[1] = gridpoints_(j + 1, 1);
-                xval = (lb + ub) * 0.5;
+                // Start point: the previous call's refined point for this
+                // cell when it is still inside it (the hot start / warm
+                // re-verification), else the cell midpoint (the original
+                // R/0.2.1 start). `minimize` evaluates this point FIRST,
+                // and the `f_stop = 0` hook returns immediately when the
+                // gain is already negative — the grid eval and the
+                // zero-cost acceptance collapse into that one evaluation.
+                Eigen::VectorXd xval((Eigen::VectorXd(2) <<
+                                         0.5 * (lb[0] + ub[0]),
+                                     0.5 * (lb[1] + ub[1]))
+                                         .finished());
+                const auto it = warm_2d_.find(key);
+                if (it != warm_2d_.end()) {
+                    const Eigen::VectorXd& r = it->second;
+                    if (r(0) > lb[0] && r(0) < ub[0] && r(1) > lb[1] &&
+                        r(1) < ub[1])
+                        xval = r;
+                }
                 solver.minimize(*this, xval, fval, lb, ub);
                 if (fval < 0.0) {
+                    // Early-stopped (negative) run: the point is not a
+                    // minimum — drop the warm entry (see the WARM-ROOT
+                    // POLICY above); next call restarts from the midpoint.
+                    warm_2d_.erase(key);
                     ans.conservativeResize(ans.rows() + 1, 2);
                     ans.bottomRows(1) = xval.transpose();
+                } else {
+                    // Converged non-negative minimum: a safe hot start
+                    // for the next call (re-verified at one evaluation).
+                    warm_2d_[key] = xval;
                 }
             }
         }
@@ -440,8 +558,9 @@ public:
         long iter;
         int convergence;
         double min_gradient;
-        // Grid-level certificate (1D families only; the 2D family leaves
-        // it NaN — its search space is a 2D grid, not a 1D sweep).
+        // Grid-level certificate: the minimum gain over all grid-cell
+        // midpoints at the final mixture (computed in `get_ans`; the 2-D
+        // analog of the 1-D `grid_gain`, docs/PERF.md §4a.3).
         double grid_gain = std::numeric_limits<double>::quiet_NaN();
         std::vector<std::vector<double>> beta;
         std::string family;
@@ -457,10 +576,16 @@ public:
         pi0new.head(nres) = resultpr_;
         pi0new.tail(nfix) = pi0fixed_;
 
+        // The final-mixture density, once (both certificates below use
+        // it); `setdens` refreshes the `fullden_`/`scale_` cache that
+        // `gradfun` reads, so the min_gradient sweep below evaluates
+        // against the FINAL mixture rather than the stale cache left by
+        // the last `solvegrad`.
+        const Eigen::VectorXd fdens = mapping(resultpt_, resultpr_);
+        setdens(fdens);
         Eigen::VectorXd maxgrad;
         Eigen::MatrixXd _g2;
-        gradfunvec(resultpt_, mapping(resultpt_, resultpr_), maxgrad, _g2, true,
-                   false);
+        gradfunvec(resultpt_, fdens, maxgrad, _g2, true, false);
         double ming = 0.0;
         if (maxgrad.size() > 0)
             ming = maxgrad.minCoeff();
@@ -475,7 +600,35 @@ public:
             a.pt[i].push_back(mu0new(i, 1));
         }
         a.pr.assign(pi0new.data(), pi0new.data() + pi0new.size());
-        a.ll = lossfunction(mapping(resultpt_, resultpr_));
+        // Grid-level certificate (2-D): the gains over ALL grid-cell
+        // midpoints at the FINAL mixture — exactly the zero-cost candidate
+        // set the search itself starts from (each cell's L-BFGS-B run
+        // evaluates its midpoint first), so a negative value here means a
+        // direction outside both the support and the search's own hot
+        // starts. Informational only (grid resolution dependent), like the
+        // 1-D `grid_gain`; it does not gate anything.
+        {
+            Eigen::VectorXd gg(2);
+            double gmin = std::numeric_limits<double>::infinity();
+            const Eigen::Index G = gridpoints_.rows();
+            for (Eigen::Index i = 0; i < G - 1; ++i) {
+                for (Eigen::Index j = 0; j < G - 1; ++j) {
+                    const double m0 =
+                        0.5 * (gridpoints_(i, 0) + gridpoints_(i + 1, 0));
+                    const double m1 =
+                        0.5 * (gridpoints_(j, 1) + gridpoints_(j + 1, 1));
+                    const Eigen::VectorXd mid(
+                        (Eigen::VectorXd(2) << m0, m1).finished());
+                    const double gm = (*this)(mid, gg);
+                    if (gm < gmin)
+                        gmin = gm;
+                }
+            }
+            a.grid_gain = (gmin == std::numeric_limits<double>::infinity())
+                              ? std::numeric_limits<double>::quiet_NaN()
+                              : gmin;
+        }
+        a.ll = lossfunction(fdens);
         a.iter = iter_;
         a.convergence = convergence_;
         a.min_gradient = ming;
@@ -540,6 +693,14 @@ private:
     mutable long iter_;
     // NPFIXEDCOMPY_PROFILE=1 diagnostic: L-BFGS-B objective evaluations.
     mutable long objevals_ = 0;
+    // Per-cell refined roots from PREVIOUS `solvegrad` calls (fast path;
+    // the CNM working-set hot start, the 2-D analog of the 1-D
+    // `warm_root_d1_`/`warm_root_d0_` arrays), keyed by
+    // `i * (G-1) + j` over grid cells. Persists across calls (every cell
+    // is visited on every sweep, so entries are overwritten in place);
+    // a root that re-verifies negative is accepted at one evaluation, a
+    // stale one just serves as a cheaper L-BFGS-B start.
+    mutable std::map<std::size_t, Eigen::VectorXd> warm_2d_;
     mutable int convergence_;
     const int verbose_;
     // NPFIC_2D_EXACT=1 selects the bit-exact R-identical objective path

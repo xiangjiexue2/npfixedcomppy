@@ -3,11 +3,14 @@
 Contract (relaxed in 0.2.1 from bit-exact matching to *similarity*; see
 `docs/PERF.md` §4a.2): the per-cell objective has a **fast path**
 (default) and a **R-identical path** (`NPFIC_2D_EXACT=1`). The fast path
-uses an explicit-inverse quadratic form and preallocated buffers —
-numerically identical to the Cholesky-based kernel to ~1e-13 relative,
-but not bit-identical, so the per-cell accept/reject trajectory may
-differ. Both paths must therefore land on a *similar* mixture: same
-iteration count, ll within a tight band, no worse than R, and the main
+uses an explicit-inverse quadratic form, preallocated buffers, and the
+TRUE directional derivative of the objective (each point's gradient
+contribution weighted by 1/(dens + pre); the R-ported unweighted form is
+the gradient of the unnormalised KDE, which only aligns when 1/F is
+~constant). Not bit-identical to the exact path, so the per-cell
+accept/reject trajectory differs (more iters, fewer evals per iter —
+see docs/PERF.md §4a.4). Both paths must therefore land on a *similar*
+mixture: ll within a tight band, no worse than R, and the main
 components in the same locations.
 
 Established facts (measured on this build; see `docs/PERF.md`):
@@ -22,12 +25,13 @@ Established facts (measured on this build; see `docs/PERF.md`):
 * the R-identical path (NPFIC_2D_EXACT=1) is bit-deterministic here:
   ll = 848.7472820349071 (6 iters, 5 support points incl. the zero-weight
   fixed point);
-* the fast path (default) is bit-deterministic here:
-  ll = 848.7611702303334 (6 iters, 5 support points incl. the
-  zero-weight fixed point).
+* the fast path (default, true directional derivative) is
+  bit-deterministic here: ll = 848.7472072261477 (10 iters, 5 support
+  points incl. the zero-weight fixed point); the older unweighted
+  ("KDE-direction") fast path gave 848.7479272517137 (6 iters).
 
 Gate:
-  1. FAST (default): two runs bit-identical; converges; iter == 6; ll
+  1. FAST (default): two runs bit-identical; converges; iter == 10; ll
      within 1e-4 of the recorded fast-path ll; self-consistent
      (`ll == -sum log dnpnormND(...)`, 1e-9); not worse than R.
   2. KERNEL parity (independent of the trajectory): PY's `dnpnormND` at
@@ -35,8 +39,17 @@ Gate:
   3. EXACT (`NPFIC_2D_EXACT=1`): two runs bit-identical; converges;
      iter == 6; ll bit-exact against the recorded value; not worse than
      R.
-  4. SIMILARITY: fast vs exact main components (weights >= 0.02) within
-     0.05 in both coordinates, and ll within 1e-2.
+  4. SIMILARITY: fast vs exact main components (weights >= 0.02) —
+     max location distance < 0.08 in both matching directions — and
+     |Δll| < 2e-2.
+  5. CERTIFICATE: both paths' grid_gain (the minimum gain over all
+     (G-1)^2 cell midpoints at the final mixture, docs/PERF.md 4a.3)
+     is > -1. A LARGE negative value means the objective ran on a
+     corrupted dataset: the row-major (n,2) data-read bug drove
+     grid_gain to ~ -518 while the similarity band (dmu < 0.08) still
+     passed, so the similarity check alone cannot catch it. Small
+     negatives (~1e-3) are the documented early-stop hot-start
+     artifact and are acceptable — hence the -1 gate, not 0.
 """
 
 import os
@@ -53,7 +66,7 @@ from npfixedcomppy import computemixdist, dnpnormND  # noqa: E402
 R_LL = 848.88775287688986
 # Recorded path results on this build (docs/PERF.md §4a.2).
 EXACT_LL = 848.7472820349071
-FAST_LL = 848.7611702303334
+FAST_LL = 848.7472072261477
 
 X = np.loadtxt(os.path.join(HERE, "parity_2d.csv"), delimiter=",")
 ipt = np.loadtxt(os.path.join(HERE, "py_initpt_2d.csv"), delimiter=",")
@@ -92,9 +105,14 @@ check("fast determinism",
       f"two runs bit-identical (ll={f1.ll!r})")
 check("fast converged", f1.convergence == 0,
       f"convergence={f1.convergence} (0)")
-check("fast iter", f1.iter == 6, f"iter={f1.iter} (R: 6)")
+check("fast iter", f1.iter == 10, f"iter={f1.iter} (R: 6)")
 check("fast ll", abs(f1.ll - FAST_LL) < 1e-4,
       f"ll={f1.ll!r} vs recorded {FAST_LL!r}")
+check("fast grid_gain certificate",
+      f1.grid_gain > -1.0,
+      f"grid_gain={f1.grid_gain!r} (recorded ~ +4.7e-3; the "
+      f"row-major data-read bug drove it to ~ -518 while the "
+      f"similarity band still passed)")
 
 ptf = np.array(f1.pt)
 prf = np.array(f1.pr)
@@ -134,6 +152,9 @@ check("exact ll (bit-exact)", e1.ll == EXACT_LL,
 check("exact no-worse-than-R",
       e1.ll <= R_LL + 1e-9,
       f"exact ll={e1.ll!r} <= R ll={R_LL!r}")
+check("exact grid_gain certificate",
+      e1.grid_gain > -1.0,
+      f"grid_gain={e1.grid_gain!r} (recorded ~ +2.7e-7)")
 
 # --- 4. fast vs exact similarity ---------------------------------------
 # Match components by LOCATION (nearest neighbour in both directions),
@@ -147,8 +168,10 @@ if len(fp) and len(ep):
         d = max(d, float(np.min(np.linalg.norm(ep - fp[i], axis=1))))
     for j in range(len(ep)):
         d = max(d, float(np.min(np.linalg.norm(fp - ep[j], axis=1))))
-# Measured on this data: max location difference 0.057 (the small
-# (0.5, 0.5) component shifts ~0.06 between the paths), |dll| = 0.0139.
+# Measured on this data (fast path with the true directional
+# derivative): max location difference 0.0066, |dll| = 7.5e-5 (the
+# older unweighted fast path: 0.026 / 6.5e-4; the pre-fix corrupted
+# fast fit drifted ~0.06 — caught by the certificate checks above).
 # Bands: dmu < 0.08, |dll| < 2e-2.
 check("fast~exact mixture",
       len(fp) == len(ep) and d < 0.08 and abs(f1.ll - e1.ll) < 2e-2,
