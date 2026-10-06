@@ -29,3 +29,12 @@ tests/npfc_bench_*.csv
 # Logs & probe/scratch output (root and subdirs)
 *.log
 *.out.txt
+
+# R reference/benchmark generators (provenance only). They invoke the live R
+# npfixedcomp2 package to (re)derive the committed reference values
+# (tests/npfc_*_ref.csv, gold_cvmadcll.txt, ...) or re-time R for docs/PERF.md.
+# Not imported by any Python test (run_all_verify.py only runs verify_*.py
+# against the committed references), so they are untracked but kept on local
+# disk for regeneration if the R package or data ever changes. Ignored so R
+# drops out of the GitHub language stats.
+tests/*.R
