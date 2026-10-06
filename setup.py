@@ -83,9 +83,10 @@ def _arch_flags() -> list:
         if level in table:
             return table[level]
     print(
-        f"npfixedcomppy: unknown NPFIC_ARCH={level!r}, using default avx2"
+        f"npfixedcomppy: unknown NPFIC_ARCH={level!r}, "
+        "using the compiler baseline (no -march/-mavx2 flag)"
     )
-    return ["/arch:AVX2"] if platform.system() == "Windows" else ["-mavx2"]
+    return ["/arch:AVX2"] if platform.system() == "Windows" else []
 
 
 if platform.system() == "Windows":

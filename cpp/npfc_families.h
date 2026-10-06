@@ -329,17 +329,21 @@ public:
     void prepare_solve(const std::vector<double>& dens) override {
         fl_.clear();
         dens_dot_fl_ = 0.0;
+        sum_fl_ = 0.0;
         cached_fl_dens_ = nullptr;
         if (dens.size() != len_)
             return;
         fl_.resize(len_);
         double s = 0.0;
+        double sf = 0.0;
         for (std::size_t i = 0; i < len_; ++i) {
             const double f = 1.0 / (dens[i] + precompute_[i]);
             fl_[i] = f;
             s += dens[i] * f;
+            sf += f;
         }
         dens_dot_fl_ = s;
+        sum_fl_ = sf;
         cached_fl_dens_ = &dens;
     }
 
@@ -349,6 +353,26 @@ public:
     void ensure_fl(const std::vector<double>& dens) const {
         if (fl_.empty() || &dens != cached_fl_dens_)
             const_cast<NpNormLL*>(this)->prepare_solve(dens);
+    }
+
+    // 1-D crossing certificate bound (see `Family::gain_curv_bound`). Here
+    // a0' = a1 exactly (a0 = dens_dot_fl - scale * sum fl*K, and the
+    // mu-derivative of the kernel yields a1), and
+    //   a0'' = -scale/beta^3 * sum_i fl_i (z_i^2 - 1) phi(z_i),
+    //   z_i = (x_i - mu)/beta,  phi = standard normal pdf,
+    // so with (z^2 - 1) phi(z) <= c2p = 2 e^{-3/2} / sqrt(2 pi) (the
+    // maximum of (z^2-1)phi(z), attained at z = sqrt(3)) the
+    // state-independent bound M = scale * c2p * sum(fl) / beta^3 holds for
+    // every mu. `sum(fl)` is cached by `prepare_solve` (one extra
+    // accumulator in the existing O(n) pass — the fl values and the
+    // `dens_dot_fl` accumulation order are unchanged, so cache hits stay
+    // bit-identical). -1 while the cache is unavailable.
+    double gain_curv_bound() const override {
+        if (fl_.empty())
+            return -1.0;
+        return (1.0 - sum_pi0fixed()) *
+               (2.0 * std::exp(-1.5 - stats::LN_SQRT_2PI)) * sum_fl_ /
+               (beta_ * beta_ * beta_);
     }
 
     double lossfunction(const std::vector<double>& maps) const override {
@@ -562,6 +586,8 @@ private:
     // cache was built for (a different `dens` triggers a rebuild).
     std::vector<double> fl_;
     double dens_dot_fl_ = 0.0;
+    // sum(fl) for the 1-D crossing certificate bound (`gain_curv_bound`).
+    double sum_fl_ = 0.0;
     const std::vector<double>* cached_fl_dens_ = nullptr;
 };
 

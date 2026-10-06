@@ -149,10 +149,19 @@ while (true):
    a. **零成本网格点接受**：若 `pv[i] < 0` 或 `pv[i+1] < 0`（扫描
       免费带出的值），直接取该网格点为根——它已是有效新支撑点，
       无需任何搜索；
-   b. **CNM 工作集再校验**：否则取上一轮调用为同一区间精化出的根
+   b. **二阶穿 0 证书**（0.3.0，默认常开，`NPFIC_1D_CERT=0` 关闭；
+      当前仅正态极大似然族 `NpNormLL` 提供曲率界）：两端增益均
+      非负时，网格扫描已免费给出两端点的 gain `pv` 与 gain 导数
+      `pg`；族的曲率界 `M ≥ −inf a0″`（正态族
+      `M = (1−pi0fixed)·2e^{−3/2}/√(2π)·Σfl/β³`）把整个区间的 gain
+      下界钉成切线抛物线最小值（凹函数在区间上的最小在端点）——
+      下界 > 0 则证明区间内 gain 不穿 0，零成本跳过 c/d
+      （温热根保留：证书是状态相关的，后续 dens 可能让旧根重新
+      可验证）；
+   c. **CNM 工作集再校验**：否则取上一轮调用为同一区间精化出的根
       `warm_root_d1_[i]`（落在区间内时），用**一次** gain 求值
       再校验，仍为负则接受；
-   c. 再否则跑 `brmin`（§6.2）做区间精化，结果写回
+   d. 再否则跑 `brmin`（§6.2）做区间精化，结果写回
       `warm_root_d1_[i]` 供下轮热启动；
 3. 汇总所有候选根，再做**一次向量的 gain 求值 + 符号过滤**
    （`vals[i] < 0` 才保留）——这是最终接受判据；
@@ -285,8 +294,7 @@ d0 的 `dfmin` 比 d1 的 `brmin` 贵：它没有导数，精化每次要在全�
 
 注意：`estpi0` 的终点**不是自由极小**——它把 `sp` 钉在命中 `val`
 上，所以 KKT 证书（`min_gradient`）对它不适用；parity 套件检查的是
-统计量命中，不是梯度（tests/verify_cvmadcll.py、accept_kkt_023.py
-均如此处理）。
+统计量命中，不是梯度（tests/verify_cvmadcll.py 均如此处理）。
 
 ## 11. 缓存层（为什么快）
 
@@ -347,12 +355,12 @@ d = `k` ≥ 2；绑定名 `npnorm2Dll` 保留为 d = 2 的别名）。结构同 
 
 | 想看的 | 在哪 |
 |--------|------|
-| 外层主循环 | `npfc_engine.h` `MixSolver::computemixdist`（L681） |
-| 支撑点搜索 d1/d0 | 同上 `solvegradd1`（L509）/ `solvegradd0`（L587） |
-| Brent / 抛物精化 | 同上 `brmin`（L359）/ `dfmin`（L430） |
-| collapse | 同上 `collapse`（L648） |
-| estpi0 / estpi0_fast | 同上（L829 / L944） |
-| 结果与证书 | 同上 `finish`（L1032） |
+| 外层主循环 | `npfc_engine.h` `MixSolver::computemixdist`（L728） |
+| 支撑点搜索 d1/d0 | 同上 `solvegradd1`（L529）/ `solvegradd0`（L634） |
+| Brent / 抛物精化 | 同上 `brmin`（L379）/ `dfmin`（L450） |
+| collapse | 同上 `collapse`（L695） |
+| estpi0 / estpi0_fast | 同上（L877 / L992） |
+| 结果与证书 | 同上 `finish`（L1080） |
 | Family 接口 | 同上（L69） |
 | 族实现（正态/t/Poisson/CLL/AD/分箱） | `npfc_families.h`（`NpNormLL`/`NpTLL`/… 10 个类） |
 | 多元正态族（N-D） | `npfc_famnd.h`（`NpNormND`；k = 2 即 R `npnorm2Dll`） |

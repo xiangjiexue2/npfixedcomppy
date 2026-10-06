@@ -2,8 +2,14 @@
 
 A Python package (C++/Eigen core) for **non-parametric estimation of
 mixing distributions** in several parametric families — a reimplementation
-of the R package [`npfixedcomp2`](https://CRAN). Algorithms follow
-Wang (2007) and the extensions added in `npfixedcomp2`.
+of the R package [`npfixedcomp2`](https://CRAN). The support-point
+algorithm follows Wang (2007, "On Fast Computation of the Non-Parametric
+Maximum Likelihood Estimate of a Mixing Distribution", *J. R. Statist.
+Soc. B* 69(2), 185–198) and the extensions added in `npfixedcomp2`; the
+null-proportion (`estpi0`) machinery follows Xue & Wang (2023, "A
+Nonparametric Mixture Approach to Density and Null Proportion Estimation
+in Large-Scale Multiple Comparison Problems", *Aust. N.Z. J. Statist.*
+65(1), 49–75). Full reference list: §7.
 
 ## 1. What this package does
 
@@ -86,7 +92,13 @@ measured evidence: [`docs/PERF.md`](docs/PERF.md).
 
 `npfixedcomppy` 是一个 Python 包（C++/Eigen 内核），用于若干参数族的
 **非参数混合分布估计**——R 包 [`npfixedcomp2`](https://CRAN) 的重写版本。
-算法遵循 Wang (2007) 及 `npfixedcomp2` 的扩展。
+支撑点算法遵循 Wang (2007, "On Fast Computation of the Non-Parametric
+Maximum Likelihood Estimate of a Mixing Distribution", *J. R. Statist.
+Soc. B* 69(2), 185–198) 及 `npfixedcomp2` 的扩展；零处点质量比例
+（`estpi0`）机制遵循 Xue & Wang (2023, "A Nonparametric Mixture Approach
+to Density and Null Proportion Estimation in Large-Scale Multiple
+Comparison Problems", *Aust. N.Z. J. Statist.* 65(1), 49–75)。
+完整引用见 §7。
 
 两个入口（与 R 包同名、同语义）：
 
@@ -182,6 +194,22 @@ removed.**
   no golden changed. (History and the A/B record: the 0.2.1 section
   below and `docs/PERF.md` §4a.)
 
+* **New: the 1-D second-order crossing certificate**
+  (`NPFIC_1D_CERT`, default on) — in the d1 support-point search, a
+  sign-change interval whose *endpoint gains are both non-negative*
+  is now skipped at zero cost when the family's curvature bound
+  `M ≥ −inf a0″` proves the gain stays positive over the whole
+  interval (the sweep's free endpoint values plus `M` bound the
+  tangent-parabola lower bound; `NpNormLL` supplies
+  `M = (1−pi0fixed)·2e^{−3/2}/√(2π)·Σfl/β³`, all other families
+  never fire). Sound: a standalone numerical harness (two `npnormll`
+  states, high-resolution re-sweep of every interval) reports zero
+  bound violations and zero unsound skips; certificate on/off is
+  bit-identical on the `npnormll` suite and `run_all_verify.py` is
+  all green; measured `certskips=0` on the current benchmarks (no
+  wall change there — the `½M h²` term dominates the endpoint gains
+  on those datasets). Full record: `docs/PERF.md` §4d.
+
 * **N-D performance** — the search grid is the tensor product of the
   per-axis marginals, (L−1)^k cells for L points per axis, so
   k ≥ 3 is combinatorially slower than k = 2: k = 3, n = 360,
@@ -222,7 +250,8 @@ worse than the historical version):
 2. **CNM working-set re-verification** — the previous call's refined
    root for an interval is re-verified with ONE gradient evaluation and
    accepted when still negative (the column-generation hot start of the
-   CNM scheme; Wang 2007, Wang & Taylor 2013). This was the experimental
+   CNM scheme; Wang 2007 — full references in §7).
+   This was the experimental
    `NPFIC_WARM=2` arm in 0.2.2; under the relaxed acceptance contract it
    is now the default and **the `NPFIC_WARM` knob has been removed**.
 3. **Negative-gain early stop in `brmin`/`dfmin`** — a candidate
@@ -304,6 +333,17 @@ N-D (`npnormND`) and removed the `NPFIC_2D_EXACT` objective path (see
   故金标无变化。（历史与 A/B 记录见下文 0.2.1 节与
   `docs/PERF.md` §4a。）
 
+* **新增：1-D 二阶穿 0 证书**（`NPFIC_1D_CERT`，默认常开）——d1
+  支撑点搜索中，*两端增益均非负*的变号区间，在族的曲率界
+  `M ≥ −inf a0″` 证明整区间 gain 保持为正时零成本跳过（扫描免费
+  带出的端点值 + `M` 钉住切线抛物线下界；`NpNormLL` 提供
+  `M = (1−pi0fixed)·2e^{−3/2}/√(2π)·Σfl/β³`，其余族永不触发）。
+  Sound：独立数值 harness（两个 npnormll 状态、每个区间高分辨率
+  重扫）零违例、零误跳；证书开/关在 npnormll 套件上位级一致、
+  `run_all_verify.py` 全绿；当前基准上实测 `certskips=0`（wall
+  无变化——那些数据集上 `½M h²` 项压过端点增益）。完整记录：
+  `docs/PERF.md` §4d。
+
 * **N-D 性能**——搜索网格是各轴 marginal 的张量积，每轴 L 点即
   (L−1)^k 格，所以 k ≥ 3 相对 k = 2 组合式变慢：k = 3、n = 360、
   显式 18 点/轴网格（17³ = 4,913 格）≈ 2.2 s（11 次迭代、4 成分、
@@ -335,8 +375,9 @@ N-D (`npnormND`) and removed the `NPFIC_2D_EXACT` objective path (see
    每个网格点的增益（免费）；负增益的网格点即有效新支撑点，无需任何
    额外求值。
 2. **CNM 工作集再校验** —— 对每个区间，用一次梯度求值再校验上一次
-   调用精化出的根，仍为负则直接接受（CNM 列生成的热启动；Wang 2007、
-   Wang & Taylor 2013）。这就是 0.2.2 里实验性的 `NPFIC_WARM=2` 臂；
+   调用精化出的根，仍为负则直接接受（CNM 列生成的热启动；Wang 2007
+   ——完整引用见 §7）。这就是 0.2.2 里实验性的
+   `NPFIC_WARM=2` 臂；
    在放宽后的验收契约下它成为默认，**`NPFIC_WARM` 旋钮已移除**。
 3. **`brmin`/`dfmin` 内负增益早停** —— 候选点精修一旦遇到负增益点
    立即返回。
@@ -400,7 +441,7 @@ call) has two experimental arms:
   A/B reference only): the previous root is re-verified with ONE
   gradient evaluation and accepted when still negative (the
   column-generation working-set hot start of the CNM scheme; Wang
-  2007, Wang & Taylor 2013). Faster (up to 2.39× on `npnormcll`) but
+  2007). Faster (up to 2.39× on `npnormcll`) but
   it can land on a *worse* optimum where the support roots drift
   between iterations (`npnormll`: Δll +4.2e-2, density off by
   relative 4.9e-3), violating the "the estimate's ll must not be
@@ -443,7 +484,7 @@ re-recorded the trajectory goldens.*
   ≤ 9e-6。
 - `NPFIC_WARM=2`（**aggressive**，CNM 工作集再校验——仅 A/B 参考）：
   用一次梯度求值再校验上次的根，仍为负则直接接受（CNM 列生成的工作集
-  热启动；Wang 2007、Wang & Taylor 2013）。更快（`npnormcll` 最高
+  热启动；Wang 2007）。更快（`npnormcll` 最高
   2.39×），但在支撑根漂移的族（如 `npnormll`：Δll +4.2e-2、密度相对
   差 4.9e-3）可能落在**更差**的最优，违反"ll 不差于历史版本"的验收
   规则——仅作实验臂保留，不作默认。
@@ -1430,10 +1471,16 @@ stderr; `NPFIC_REFINE_STEPS` caps the
 per-candidate refinement steps inside `brmin`/`dfmin` (experimental,
 default `-1` = unlimited = shipped behaviour, see What's new);
 `OMP_NUM_THREADS` sizes Eigen's pool (when the build has OpenMP)
-without changing the results. The 0.2.2 `NPFIC_WARM` knob
-(support-point hot start) was **removed** in 0.2.3 — its `=2` CNM
-re-verification arm is now the always-on engine behaviour ("What's new
-in 0.2.3", [`docs/PERF.md`](docs/PERF.md) §4c).
+without changing the results. `NPFIC_1D_CERT` (0.3.0, default on)
+gates the 1-D second-order crossing certificate — d1 sign-change
+intervals whose gain is proven positive by the family's curvature
+bound skip the CNM check and `brmin` entirely (`NPFIC_1D_CERT=0`
+restores the pre-0.3.0 loop; the PROFILE line adds a `certskips=`
+counter — [`docs/PERF.md`](docs/PERF.md) §4d). The 0.2.2
+`NPFIC_WARM` knob (support-point hot start) was **removed** in 0.2.3
+— its `=2` CNM re-verification arm is now the always-on engine
+behaviour ("What's new in 0.2.3",
+[`docs/PERF.md`](docs/PERF.md) §4c).
 
 ### 性能
 
@@ -1513,3 +1560,51 @@ t 族的核是廉价的 CDF 差值，快约 8–14 倍。分阶段 profile、内
 大小（OpenMP 构建时），不改变结果。0.2.2 的 `NPFIC_WARM` 旋钮
 （支撑点热启动）已在 0.2.3 **移除**——其 `=2` CNM 再校验臂现为引擎
 默认行为（"What's new in 0.2.3"、[`docs/PERF.md`](docs/PERF.md) §4c）。
+`NPFIC_1D_CERT`（0.3.0，默认常开）门控 1-D 二阶穿 0 证书：把 d1
+变号区间中可证明增益为正者整体跳过 CNM/`brmin` 工作
+（`NPFIC_1D_CERT=0` 回到 0.3.0 之前的循环；PROFILE 行新增
+`certskips=` 计数——[`docs/PERF.md`](docs/PERF.md) §4d）。
+
+## 7. References
+
+The algorithm references (full citations; the short forms elsewhere
+in this file and in `cpp/` point here):
+
+1. **Wang (2007)** — the support-point (column-generation) search
+   for the non-parametric MLE of a mixing distribution, including the
+   CNM working-set hot start: Y. Wang, "On Fast Computation of the
+   Non-Parametric Maximum Likelihood Estimate of a Mixing
+   Distribution", *Journal of the Royal Statistical Society, Series B*
+   69(2), 185–198, 2007. DOI: 10.1111/j.1467-9868.2007.00583.x.
+2. **Xue & Wang (2023)** — the null-proportion / density
+   simultaneous estimation that `estpi0` implements: X. Xue, Y. Wang,
+   "A Nonparametric Mixture Approach to Density and Null Proportion
+   Estimation in Large-Scale Multiple Comparison Problems",
+   *Australasian Journal of Statistics* 65(1), 49–75, 2023.
+   DOI: 10.1111/anzs.12383.
+
+The fixed-component (`mu0`/`pi0`) mechanism is the same extension the
+R package `npfixedcomp2` builds on top of Wang (2007); an earlier
+draft of this list cited a Wang & Taylor (2013) fixed-component paper
+for it, but that item could not be verified against Crossref and has
+been withdrawn.
+
+### §7 中文注释
+
+本包的算法文献（完整出处；本文件与 `cpp/` 源码中的短引用均指向
+本节）：
+
+1. **Wang (2007)** —— 非参数混合分布极大似然估计的支撑点（列生成）
+   搜索，含 CNM 工作集热启动：Y. Wang, "On Fast Computation of the
+   Non-Parametric Maximum Likelihood Estimate of a Mixing
+   Distribution", *Journal of the Royal Statistical Society, Series B*
+   69(2), 185–198, 2007. DOI: 10.1111/j.1467-9868.2007.00583.x。
+2. **Xue & Wang (2023)** —— 空假设比例与密度同时估计（`estpi0`
+   实现的机制）：X. Xue, Y. Wang, "A Nonparametric Mixture Approach
+   to Density and Null Proportion Estimation in Large-Scale Multiple
+   Comparison Problems", *Australasian Journal of Statistics*
+   65(1), 49–75, 2023. DOI: 10.1111/anzs.12383。
+
+固定分量（`mu0`/`pi0`）机制即 R 包 `npfixedcomp2` 在 Wang (2007)
+之上的同一扩展；早期稿曾引一篇 Wang & Taylor (2013) 的固定分量
+论文作其出处，经 Crossref 多路核实无法确认该文存在，已撤除。

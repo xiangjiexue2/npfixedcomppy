@@ -102,6 +102,14 @@ public:
     // Default: nothing to prepare.
     virtual void prepare_solve(const std::vector<double>& /*dens*/) {}
 
+    // Optional bound `M >= -inf a0''` for the weight-direction gain `a0`
+    // (d1 families only), consumed by the 1-D crossing certificate in
+    // `solvegradd1`: the sweep's endpoint values (a0 and a0' = a1) plus M
+    // bound a0 from below on the whole interval. A family returning a bound
+    // must return it for the a0 whose FIRST DERIVATIVE IS a1 (the d1
+    // convention). Default: -1 = no bound (the certificate never applies).
+    virtual double gain_curv_bound() const { return -1.0; }
+
     // Recompute the weights `pi0` given support points `mu0` and the current
     // mixture density `dens` (constrained NNLS weight subproblem followed by
     // the Armijo line search `checklossfun2`).
@@ -326,14 +334,26 @@ public:
         // loop then needs more iterations to converge).
         if (const char* e = std::getenv("NPFIC_REFINE_STEPS"))
             refine_steps_ = std::atol(e);
+        // 1-D crossing certificate (default on; NPFIC_1D_CERT=0 disables):
+        // for a sign-change interval both of whose endpoint gains are
+        // non-negative, the sweep's free endpoint values (a0 = `pv`,
+        // a0' = a1 = `pg`) plus the family's `gain_curv_bound` (M >= -inf
+        // a0'') give a tangent-parabola lower bound on a0 over the whole
+        // interval; positive => a0 > 0 in it, so the CNM one-evaluation
+        // check and `brmin` are guaranteed to find no valid root — both are
+        // skipped at zero cost. Sound => the accepted-point set (and hence
+        // the whole trajectory and the goldens) is unchanged.
+        cert_1d_ = true;
+        if (const char* e = std::getenv("NPFIC_1D_CERT"))
+            cert_1d_ = std::atol(e) != 0;
         // Support-point hot start (always on): the grid is fixed for the
         // solver's life, so each sign-change interval (d1) / triple (d0)
         // has a stable index. The PREVIOUS call's refined root for an
         // interval is re-verified against the NEW gradient with ONE
         // gradient-value evaluation and accepted when still negative,
         // skipping the exact `brmin`/`dfmin` search — the CNM working-set
-        // re-verification (column-generation hot start; Wang 2007, Stat.
-        // Modelling; Wang & Taylor 2013, JCGS). Measured A/B (docs/PERF.md
+        // re-verification (column-generation hot start; Wang 2007,
+        // JRSS-B — full references in docs/PERF.md §7). Measured A/B (docs/PERF.md
         // §4b): 1.03–2.39× faster; on families whose support roots drift
         // between iterations (e.g. npnormll/npnormad) it can land on a
         // slightly different local optimum — the goldens in tests/ are
@@ -540,6 +560,33 @@ public:
             } else if (pv[i + 1] < 0.0) {
                 root = gp[i + 1];
             } else {
+                // 1-D crossing certificate (default on, NPFIC_1D_CERT=0 off):
+                // the sweep already gave a0 (pv) and a0' (= a1 = pg) at both
+                // endpoints; with M >= -inf a0'' from the family, the
+                // tangent-parabola lower bound is concave, so its interval
+                // minimum sits at an endpoint:
+                //   min a0 >= min( a0(a), a0(b),
+                //                  a0(a) + a0'(a) h - (M/2) h^2,
+                //                  a0(b) - a0'(b) h - (M/2) h^2 ).
+                // Positive => a0 > 0 on the WHOLE interval, so the CNM
+                // re-verification and `brmin` below are guaranteed to find
+                // no valid root — skip both at zero cost. The warm root is
+                // KEPT (the certificate is state-dependent: a later dens may
+                // make the old root verifiable again).
+                if (cert_1d_) {
+                    const double M = fam_->gain_curv_bound();
+                    if (M >= 0.0) {
+                        const double h = gp[i + 1] - gp[i];
+                        const double half = 0.5 * M * h * h;
+                        const double lb = std::min(
+                            {pv[i], pv[i + 1], pv[i] + pg[i] * h - half,
+                             pv[i + 1] - pg[i + 1] * h - half});
+                        if (lb > 0.0) {
+                            ++cert_skips_;
+                            continue;
+                        }
+                    }
+                }
                 // CNM working-set re-verification: re-verify the PREVIOUS
                 // call's refined root for this interval with ONE
                 // gradient-value evaluation. Still negative => a valid
@@ -813,10 +860,11 @@ public:
             std::fprintf(stderr,
                          "PROFILE iters=%ld total=%.1fms  solvegrad=%.1f "
                          "mapping=%.1f  loss=%.1f  weights=%.1f  collapse=%.1f "
-                         "evals=%ld freshcols=%zu freshms=%.1f (ms)\n",
+                         "evals=%ld certskips=%ld freshcols=%zu freshms=%.1f "
+                         "(ms)\n",
                          iter_, tot * 1e3, pt_grad * 1e3, pt_map * 1e3,
                          pt_loss * 1e3, pt_wt * 1e3, pt_col * 1e3,
-                         grad_evals_, kf.first, kf.second);
+                         grad_evals_, cert_skips_, kf.first, kf.second);
         }
         resultpt_ = std::move(mu0);
         resultpr_ = std::move(pi0);
@@ -1092,6 +1140,11 @@ private:
     // gradfun = 1 each, vectorised gradfunvec = one per point); the A/B
     // "less work per step" knob is read against this (PROFILE line only).
     mutable long grad_evals_ = 0;
+    // 1-D crossing certificate (see the constructor and `solvegradd1`): the
+    // gate + the per-run count of intervals certified (and skipped); the
+    // count is reported on the PROFILE line only.
+    bool cert_1d_ = false;
+    mutable long cert_skips_ = 0;
 };
 
 }  // namespace npfc

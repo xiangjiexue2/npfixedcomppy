@@ -15,7 +15,10 @@ Python-side binning and grid generation. `evals` is the count of
 `(mu, dens)` gradient evaluations inside the `solvegrad` loop;
 `freshcols` / `freshms` count the off-grid kernel columns that had to
 be evaluated for the first time inside that loop (the ones the
-section-3 column cache cannot serve) and time that work:
+section-3 column cache cannot serve) and time that work;
+`certskips` (0.3.0) counts the d1 sign-change intervals the section-4d
+crossing certificate proved gain-positive and skipped (0 when the
+gate is off or never fires):
 
 | case | iters | total | solvegrad | mapping | weights | collapse | loss | evals | freshcols | freshms |
 |------|-------|-------|-----------|---------|---------|----------|------|-------|-----------|---------|
@@ -1018,8 +1021,8 @@ data/initial mix/grid/tol, median of 5):
   reference only).** The previous root is re-verified with ONE
   gradient-value evaluation and accepted when still negative,
   skipping the search entirely — the column-generation working-set
-  hot-start of the CNM scheme (Wang 2007, *Statistical Modelling*;
-  Wang & Taylor 2013, *J. Comput. Graph. Statist.*). Measured up to
+  hot-start of the CNM scheme (Wang 2007, *J. R. Statist. Soc. B* —
+  full references in section 7). Measured up to
   2.39× (`npnormcll` 3221 → 1346 ms, 61 → 39 iterations) but the
   quality is not preserved where the support roots drift between
   outer iterations: `npnormll` lands on a worse optimum
@@ -1061,8 +1064,9 @@ data/initial mix/grid/tol, median of 5):
   中五个实际上 ~1e-9 位级一致。
 * **`NPFIC_WARM=2`——激进（CNM 工作集再校验；仅作 A/B 参考）**：
   上轮根用**一次**梯度值求值再验证、仍为负即接受、跳过整个搜索
-  ——CNM 方案（Wang 2007 *Statistical Modelling*；Wang & Taylor
-  2013 *JCGS*）的列生成工作集热启动。实测最高 2.39×
+  ——CNM 方案（Wang 2007 *J. R. Statist. Soc. B*——完整引用见 §7）
+  的列生成工作集热启动。
+  实测最高 2.39×
   （`npnormcll` 3221 → 1346 ms、61 → 39 轮），但支撑根在外轮之间
   漂移时质量不保：`npnormll` 落到较差最优（ll +4.16e-2、density
   相对差 4.9e-3）、`npnormad` +1.7e-3，`nptllw` 甚至*变慢*
@@ -1207,6 +1211,120 @@ n=5000 2957 → **857 ms**（3.5×，31 → 11 轮）；`nptllw` β=5
   最优（把点质量权重钉住以命中阈值），KKT 证书不适用；parity 门
   查它的统计量命中而非 `min_gradient`。
 
+### 4d. 1-D second-order crossing certificate (`NPFIC_1D_CERT`, 0.3.0)
+
+The d1 sign-change loop (section 4c, step 2) still paid a CNM
+re-verification evaluation — and, when that failed, a `brmin`
+refinement — for intervals whose *endpoint gains are both
+non-negative*: there, a valid root can exist only if the gain dips
+back below zero inside the interval. Such an interval can be
+excluded at zero cost when the family provides a curvature bound.
+
+The grid sweep already gives, at both endpoints, the gain `pv` and
+the gain derivative `pg` (= the d1 `a1`), and `NpNormLL` supplies
+`M ≥ −inf a0″` (all `mu`): with `a0″ = −(1−pi0fixed) β⁻³
+Σᵢ flᵢ (zᵢ²−1) φ(zᵢ)`, `zᵢ = (xᵢ−μ)/β`, `flᵢ = 1/(densᵢ+preᵢ)`, and
+the pointwise bound `(z²−1) φ(z) ≤ 2e^{−3/2}/√(2π)` (maximum at
+`z = √3`),
+
+    M = (1−pi0fixed) · 2e^{−3/2}/√(2π) · Σᵢ flᵢ / β³.
+
+`Σ fl` is one extra accumulator in the per-solve `fl` pass (existing
+O(n); the `fl` values and the `dens_dot_fl` accumulation order are
+unchanged, so cached results stay bit-identical). The tangent
+parabolas at the two endpoints bound `a0` from below over the whole
+interval, and that bound being concave puts its interval minimum at
+an endpoint, so
+
+    min a0 ≥ min( pv(a), pv(b),
+                  pv(a) + pg(a)·h − ½M·h²,
+                  pv(b) − pg(b)·h − ½M·h² ),   h = b − a.
+
+Positive ⇒ `a0 > 0` on the whole interval ⇒ neither the CNM check
+nor `brmin` can find a valid root ⇒ both are skipped (one
+gradient evaluation plus the refinement, per firing interval). The
+warm root is KEPT — the certificate is state-dependent (it uses the
+current `dens`), so a later iteration may make the old root
+verifiable again. The gate is on by default; `NPFIC_1D_CERT=0`
+restores the pre-0.3.0 loop exactly; only `NpNormLL` implements
+`gain_curv_bound` (default −1 = never fires), so the t/Poisson/CLL/
+AD/binned/N-D families are untouched. Soundness: a standalone
+numerical harness re-derives the gain and its derivatives for two
+`npnormll` states (a near self-consistent one-component fit and a
+three-component weight-transfer scan over 20 states), high-
+resolution re-sweeps every interval, and checks the four-tangent
+bound against the true interval minimum — **zero violations on all
+99 scanned intervals, zero unsound skips** (the single candidate
+interval that reaches the CNM stage is certified positive and
+indeed safe). Engine-level: gate on vs off returns
+**bit-identical** ll/pt/pr/iter/min_gradient/grid_gain on the
+`npnormll` suite (computemixdist / n=5000 / fixed component /
+estpi0) — the gate only skips provably-positive intervals — and
+the full `run_all_verify.py` (11 suites) passes `TOTAL BAD: 0`.
+
+Measured: on the current benchmark data the certificate **never
+fires** (`certskips=0` on all four npnormll benchmark runs — the
+`½M h²` term ≈ 16 dominates the endpoint gains on those
+datasets), so A/B wall is neutral (n=5000 median 22.1 ms off vs
+22.4 ms on over 30 reps, noise level) while the accepted-point set
+and all trajectories are bit-identical. The bound is deliberately
+state-independent and uses the pointwise maximum of
+`(z²−1)φ(z)`, so it is loose exactly where the kernel is flat —
+it fires on data where endpoint gains are large relative to the
+grid spacing (e.g. wide-support fits, coarse grids). Kept on by
+default: per-candidate cost is a few nanoseconds when idle, and it
+is a zero-cost certificate for future families to override
+`gain_curv_bound` with (the d0 path has no `a1` analogue and
+deliberately does not use it).
+
+#### §4d 中文注释
+
+d1 变号区间循环（§4c 第 2 步）在**两端增益均非负**的区间上仍会花
+一次 CNM 再校验求值——若仍为负还要跑 `brmin` 精化。这类区间存在
+有效根的充要条件是 gain 在区间内部下穿 0；若族提供曲率界
+`M ≥ −inf a0″`（对所有 `mu`），整个区间可以在**零成本**下排除。
+
+网格扫描已免费给出两端点的 gain `pv` 与 gain 导数 `pg`（= d1 的
+`a1`）；正态极大似然族的界来自
+`a0″ = −(1−pi0fixed) β⁻³ Σᵢ flᵢ (zᵢ²−1) φ(zᵢ)`（`zᵢ = (xᵢ−μ)/β`，
+`flᵢ = 1/(densᵢ+preᵢ)`）加上逐点界 `(z²−1)φ(z) ≤
+2e^{−3/2}/√(2π)`（最大值在 `z = √3` 取到）：
+
+    M = (1−pi0fixed) · 2e^{−3/2}/√(2π) · Σᵢ flᵢ / β³。
+
+`Σ fl` 是每次求解的 `fl` 通道里多出的一个累加器（既有 O(n)；`fl`
+取值与 `dens_dot_fl` 累加顺序不变，缓存结果保持位级一致）。两端点
+的切线抛物线把整个区间的 gain 从下方钉住，而该下界是凹函数、区间
+最小必在端点：
+
+    min a0 ≥ min( pv(a), pv(b),
+                  pv(a) + pg(a)·h − ½M·h²,
+                  pv(b) − pg(b)·h − ½M·h² )，h = b − a。
+
+下界 > 0 ⟹ 整区间 `a0 > 0` ⟹ CNM 校验与 `brmin` 都找不到有效根
+⟹ 两者整体跳过（每次触发省一次梯度求值加一次精化）。温热根**保留**
+——证书是状态相关的（用的是当前 `dens`），后续迭代可能让旧根重新
+可验证。默认常开；`NPFIC_1D_CERT=0` 精确回到 0.3.0 之前的循环；
+只有 `NpNormLL` 覆写 `gain_curv_bound`（默认 −1 = 永不触发），
+t/Poisson/CLL/AD/分箱/N-D 族不受影响。soundness：独立数值 harness
+对两个 npnormll 状态（近自洽的单分量拟合、三分量权重转移扫描
+20 个状态）重推导 gain 及其导数、对每个区间高分辨率重扫、把
+四端点下界与区间真最小值比对——**99 个扫描区间零违例、零误跳**
+（唯一到达 CNM 阶段的候选区间被证书判正且确实安全）。引擎级：
+开关证书跑 npnormll 套件（computemixdist / n=5000 / 固定分量 /
+estpi0），ll/pt/pr/iter/min_gradient/grid_gain **位级一致**（门
+只跳过可证明为正的区间）；`run_all_verify.py` 全套 11 个套件
+`TOTAL BAD: 0`。
+
+实测：在当前基准数据上证书**从不触发**（4 个 npnormll 基准运行
+`certskips=0`——`½M h² ≈ 16` 项压过端点增益），故 A/B wall 中性
+（n=5000 中位数 关 22.1 ms vs 开 22.4 ms，30 次重复，噪声级），
+接受点集与全部轨迹位级一致。界是刻意状态无关的、用了 `(z²−1)φ(z)` 的逐点
+最大值，所以在核平坦处偏松——它在"端点增益相对网格间距大"的数据
+上会触发（宽支撑拟合、粗网格）。保持默认常开：空闲时每候选点仅
+几纳秒；对后续族是零成本钩子（覆写 `gain_curv_bound` 即可）；d0
+路径无 `a1` 对应量，刻意不使用。
+
 ## 5. What was *not* done, and why
 
 * **Capping the per-candidate refinement (`NPFIC_REFINE_STEPS`) —
@@ -1348,3 +1466,49 @@ parity 门（全部须 `TOTAL BAD: 0`，代码块见上）：
 `Rscript bench_2d_r.R`（R），共读 `parity_2d.csv`；§4a.2 快路径
 中位数来自 `tests/measure_2d.py`，运行加 `NPFIXEDCOMPY_PROFILE=1`
 打印 `objevals` 行。
+
+## 7. References
+
+The algorithm references for this package:
+
+1. **Wang (2007)** — the support-point (column-generation) search
+   for the non-parametric MLE of a mixing distribution that the
+   engine implements (the CNM scheme; §4b/§4c re-verify its
+   working set with one gradient evaluation per candidate):
+   Y. Wang, "On Fast Computation of the Non-Parametric Maximum
+   Likelihood Estimate of a Mixing Distribution", *Journal of the
+   Royal Statistical Society, Series B (Statistical Methodology)*
+   69(2), 185–198, 2007. DOI: 10.1111/j.1467-9868.2007.00583.x.
+2. **Xue & Wang (2023)** — the null-proportion / density
+   simultaneous estimation that `estpi0` implements:
+   X. Xue, Y. Wang, "A Nonparametric Mixture Approach to Density
+   and Null Proportion Estimation in Large-Scale Multiple
+   Comparison Problems", *Australasian Journal of Statistics*
+   65(1), 49–75, 2023. DOI: 10.1111/anzs.12383.
+
+The fixed-component (`mu0`/`pi0`) mechanism is the same extension
+the R package `npfixedcomp2` builds on top of Wang (2007); an
+earlier draft of this list cited a Wang & Taylor (2013)
+fixed-component paper for it, but that item could not be verified
+against Crossref and has been withdrawn.
+
+#### §7 中文注释
+
+本包的算法文献（完整出处，代码内短引用指向本节）：
+
+1. **Wang (2007)** —— 本引擎实现的非参数混合分布极大似然估计的
+   支撑点（列生成）搜索（CNM 方案；§4b/§4c 以每候选点一次梯度
+   求值再校验其工作集）：
+   Y. Wang, "On Fast Computation of the Non-Parametric Maximum
+   Likelihood Estimate of a Mixing Distribution", *Journal of the
+   Royal Statistical Society, Series B (Statistical Methodology)*
+   69(2), 185–198, 2007. DOI: 10.1111/j.1467-9868.2007.00583.x。
+2. **Xue & Wang (2023)** —— 空假设比例与密度同时估计，
+   `estpi0` 实现的机制：X. Xue, Y. Wang, "A Nonparametric Mixture
+   Approach to Density and Null Proportion Estimation in
+   Large-Scale Multiple Comparison Problems", *Australasian Journal
+   of Statistics* 65(1), 49–75, 2023. DOI: 10.1111/anzs.12383。
+
+固定分量（`mu0`/`pi0`）机制即 R 包 `npfixedcomp2` 在 Wang (2007)
+之上的同一扩展；早期稿曾引一篇 Wang & Taylor (2013) 的固定分量
+论文作其出处，经 Crossref 多路核实无法确认该文存在，已撤除。
