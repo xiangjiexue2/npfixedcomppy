@@ -71,6 +71,37 @@ Reading the profile:
   still churns: its AD re-weighting keeps producing new support sets, so
   most fills miss the memo, and ~20 ms goes to `collapse`.
 
+### §1 中文注释
+
+完整 `computemixdist` 调用的分阶段 profile（`NPFIXEDCOMPY_PROFILE=1`
+打印一行到 stderr，3 次取中位数；单位 ms；profiled `total` 只覆盖
+C++ 引擎各阶段，§4 的 wall 另含 Python 侧分箱与网格生成；`evals` 是
+`solvegrad` 循环内的 `(mu, dens)` 梯度求值数；`freshcols`/`freshms`
+是循环内首次求值的离网格核列数与耗时——§3 列缓存服务不了的）。要点：
+
+* **`nptll` β=5** — 仍由 `solvegrad` 主导，但 0.2.3 支撑点搜索放宽
+  （§4c）把梯度求值 3733 → 1191（3.1×）、fresh 列 455 → 61（7.5×）；
+  61 列 fresh `dnt`（AS-243 级数，包内最贵核）占 255 ms，加 ≈80 ms
+  `collapse` 重映射。核列缓存消掉的是*在网格*重求值（缓存前 4.4 s
+  中的 ≈1.4 s）；pdf 的 `df` 级常数（`log df`、`√((df+2)/df)`、
+  `gammln` 对）每 run 预算进 `stats::DntConst`（经 `dnt_c`，与
+  `dnt` 位级一致）。
+* **`d0` 族的成本就是 fresh 离网格列**：`nptll` β=5 为 255/266 ms
+  （61 列）、`nptllw` 为 22/35 ms（53 列）；0.2.3 放宽前同用例
+  fresh 工作 2304/1053 ms（455/300 列）——负增益早停（任一求值点
+  增益为负即返回；调用方符号过滤接受任一负点，不要求精确最小）+
+  CNM 再校验（§4c）使多数候选到不了曾产生 fresh 列的抛物精化。
+* **`npnormcll`** — 由 `weights` 主导（≈65%）：每轮约束 NNLS 子问题
+  （n ≤ 1000 用 `pnnlssum`，更大用 `pnnqp`）+ 网格扫描——算法固有
+  小矩阵求解，不是重复求值浪费。0.2.3 放宽还改变了它算的内容：
+  接受更丰富支撑集（92 → 107 点）、ll 略好（相对 0.2.2 拟合
+  4.8e-6），代价 19 → 31 轮——唯一放宽使 wall 变慢的族（§4c）。
+* **分箱正态族** — 网格扫描由钉住的网格填充服务（§3），
+  `npnormllw` 引擎 21 ms / wall 28 ms；其 `solvegrad` 剩的是离网格
+  单点候选填充（每个是新 `mu` 向量，必然 fresh）加廉价的 d1 pdf
+  部分。`npnormadw`（总 184 ms，36 → 17 轮）仍翻搅——AD 重加权
+  不断产生新支撑集，填充大多 miss memo，≈20 ms 进 `collapse`。
+
 ## 2. Compute core: C++/Eigen (Eigen-internal parallel GEMM when probed)
 
 The whole compute stack — engine, support-point solvers, constrained NNLS,
@@ -134,6 +165,54 @@ behaviour — see section 5), and, for OpenMP builds,
 results). (The `NPFIC_WARM` knob documented in section 4b was REMOVED in
 0.2.3 — its `=2` CNM re-verification arm is now the always-on engine
 behaviour, section 4c.)
+
+### §2 中文注释
+
+整个计算栈——引擎、支撑点求解器、约束 NNLS、梯度/权重扫描、核矩阵
+填充、混合密度——都在 `cpp/`（pybind11 模块 `npfixedcomppy._core`，
+`setup.py` 默认 MSVC `/std:c++17 /O2 /arch:AVX2`，GCC/Clang
+`-O3 -mavx2`）。
+
+**SIMD 级别在构建期而非运行期决定**，由 `NPFIC_ARCH` 环境变量选择：
+`avx2`（默认）/ `avx` / `avx512` / `native`（仅 GCC/Clang
+`-march=native`）/ 空 = 纯 x86-64 SSE2 基线。构建产物只能跑在该指令
+集（或超集）硬件上；无运行期 ISA 分发，源码不变。注意 MSVC 与
+GCC/Clang flag 行为**不一致**：MSVC `/arch:AVX2` 会让优化器把乘加对
+收缩为 FMA（`/fp:precise` 下的文档化 MSVC 行为）；GCC/Clang 不加
+`-mfma` 则 FMA 不开（实际未加）。parity 门验证的是出货构建；跨架构
+位级一致不是要求。
+
+SSE2 基线 → AVX2 的两个实测后果：
+
+* 宽分箱填充（`npnormllw`、`nptllw`）约 2×（n=5000 354 → 130 ms），
+  与 R 的历史差距缩到几个百分点内——网格填充 memo（§3）之后
+  `npnormllw` 进一步到 ≈37 ms wall，比 R 快 ≈3×（§4）；
+* 小样本未分箱正态变慢 ≈4 ms（`npnormll` n=1000：7.8 → 11.6 ms）
+  ——短向量的 AVX2 尾部效应；`NPFIC_ARCH=` 可恢复基线。t 族与所有
+  大样本用例不受影响。
+
+**包内没有手写 OpenMP——唯一的线程来自 Eigen 自身，由构建期 OpenMP
+探测打开。** 所有手写 `#pragma omp` 已移除（与 Eigen 内部线程处理
+相互作用，且结果变得机器相关）。改为：`setup.py` 用编译器的 OpenMP
+flag（MSVC `cl /openmp`、Unix `g++`/`clang++ -fopenmp`）探测编译，
+通过则把 flag 加进扩展构建——正是定义 `_OPENMP` 的 flag，即 Eigen
+编译期门的整体（`eigen/Eigen/Core` 的 `EIGEN_HAS_OPENMP`）。于是
+mapping/computeweights 热路径上 Eigen 内部并行 GEMM/GEMV 生效，其余
+循环保持串行（位级一致的参考顺序）；编译器无该 flag 时构建回退
+串行 Eigen，别无他变。确定性契约：
+
+* **固定构建 + 固定 `OMP_NUM_THREADS`** 下，相同输入 → 位级相同输出
+  ——Eigen 并行 GEMM 把归约分成固定数量的块、按固定顺序合并，GOLD
+  parity 门依赖的正是这一点；
+* 换线程数至多重排 Eigen 并行 GEMM 内的浮点归约——舍入尺度差异，
+  远在 parity 门（ll 1e-9、pt 1e-6）之内。
+
+环境旋钮：`NPFIXEDCOMPY_PROFILE=1`（分阶段计时 + `solvegrad` 求值
+数与 fresh 列数/耗时）、`NPFIC_REFINE_STEPS`（实验性：限制
+`brmin`/`dfmin` 内每候选精化步数；默认 `-1` = 不限制 = 出货行为，
+§5）、OpenMP 构建下的 `OMP_NUM_THREADS`（调 Eigen 线程池，对结果的
+影响见上）。§4b 记载的 `NPFIC_WARM` 旋钮已于 0.2.3 **移除**——其
+`=2` CNM 再校验臂现为引擎常开行为（§4c）。
 
 ## 3. The kernel column cache
 
@@ -202,6 +281,54 @@ from ≈ 131 ms wall (grid sweep ~108 ms of a 129 ms engine total) to
 its AD re-weighting keeps producing new support sets, so most fills
 miss the memo — and still trails R (332 ms vs ≈ 170 ms).
 
+### §3 中文注释
+
+缓存前的主要浪费：引擎在**每一轮外层迭代的每个环节**重复求值*相同*
+的核列——`solvegrad` 网格扫描、`mapping`、`computeweights` 填充、
+`collapse` 重映射、轮末 mapping。对昂贵核（非中心 t、正态 CDF、
+单参数正态）即每轮 3–8 次冗余的 `(n × m)` 矩阵求值。
+
+核列 `K[:, mu]` **只**依赖 `(data, beta, mu)`——与当前权重、密度、
+迭代轮次无关——所以每个不同 `mu` **每次拟合只求值一次**（网格点
+在 `prepare` 里、离网格点首次使用时惰性求值），所有消费方读共享
+列。
+
+正确性被保持而非近似：
+
+* 缓存列由与 fresh 填充完全相同的逐行求值产生（升序 `i`、相同算术），
+  与无缓存计算**位级一致**——只去掉冗余重求值，从不改变算术或其
+  顺序；
+* 从列组装 `(n × m)` 矩阵的消费方保留参考的逐列累加；
+* 全部 parity 套件在缓存就位后仍 `TOTAL BAD: 0` 不变。
+
+实测效果（本构建）：`nptll` β=5 n=5000：4.43 s → **2.47 s**（−44%）；
+`npnormcll` n=1000：1.21 s → **0.99 s**（−19%）；`npnormad` n=1000：
+60 ms → **19.5 ms**；`npnormcvm` n=1000：**36 ms**；`nptll` β=∞
+n=1000：43 ms → **36 ms**；`npnormll` n=1000/5000：8/18 ms →
+**11.6/19.2 ms**（小样本 AVX2 尾部，见 §2）。
+
+**列缓存不适用于三个分箱正态族（`npnormllw` / `npnormcvmw` /
+`npnormadw`）。** 其核矩阵 `K(bins × grid)` 是梯形填充，*宽度*
+（分量列数 `N`）依赖当前支撑分布的展宽——同一个 `(bin, grid)` 点在
+不同扫描点是*不同*的核，没有可复用的 `(x, mu)` 列。（`nptllw` 是
+例外：其分箱 t 核是 CDF 差值 `Φ(x; μ−h) − Φ(x; μ)`，纯
+`(data, df, h, mu)` 的函数，因此离网格点用列缓存。）填充本身是 R
+`dnormarray` 布局的列主序重写（无行主序临时量、无转置、常量外提），
+与参考累加位级一致。
+
+**网格填充 memo（分箱正态族）。** 列缓存复不了的，memo 能复：一次
+拟合内，分箱填充只为很少一组重复的 `mu` 向量被请求——网格、当前
+支撑集、若干求解器内部点——所以 `detail::KernelMemo` 按*精确* `mu`
+向量键控缓存最近一次填充，网格填充在 `prepare` 钉住（由 `grid_m`
+服务）。被服务的矩阵与同参数 fresh `ddiscnorm_m` / `pnorm_disc_m`
+位级一致；不同 `mu` 向量则 fresh 填充。这消掉了曾主导分箱
+`solvegrad` 的逐候选重填：`npnormllw` n=5000 从 ≈131 ms wall
+（129 ms 引擎总计中网格扫描 ≈108 ms）降到 ≈31 ms 引擎 / ≈37 ms
+wall——现在比 R 的 ≈120 ms **快 ≈3×**（剩下的是离网格单点候选
+填充，每个是新 `mu` 向量，加廉价的 d1 pdf 部分）。`npnormadw` 受益
+较少——AD 重加权不断产生新支撑集，填充大多 miss memo——仍落后于 R
+（332 ms vs ≈170 ms）。
+
 ## 4. Comparison with R `npfixedcomp2` (same machine)
 
 Py: median of 5 (`tests/perf_baseline.py` / `tests/bench_binned.py`);
@@ -269,6 +396,34 @@ nor R's RcppEigen 3.4.0 ships a double-precision SIMD `pexp` for x86
 on both sides and no wider instruction set can touch it; the remaining
 binned gap is *how often* each side refills, and the memo closes it for
 the LL-style sweep.
+
+### §4 中文注释
+
+测量口径：Py 为 5 次中位数（`tests/perf_baseline.py` /
+`tests/bench_binned.py`）；R 为 3 次最佳（`tests/bench_r.R` /
+`tests/bench_binned_r.R`），R 4.6.1 + RcppEigen 3.4.0、R 默认 MSVC
+flag（SSE2 基线）。Py 列是 0.2.3 构建（同一脚本重测；0.2.3 放宽
+§4c 移动最多的用例给出 0.2.2 对照列；R 数字不变）。0.3.0 构建未
+动一维引擎与核、k = 2 正态族位级一致（§4a），故这些数字继续有效。
+
+解读：0.2.3 支撑点搜索放宽（§4c）把 t 族领先扩到 58×（未分箱 β=5）
+与 17–52×（分箱）——放宽的区间精化把 n=5000 的 fresh 离网格 `dnt`
+列 455 → 61。未分箱正态族得 1.3–2×（`fl` 缓存 + 零成本网格接受）。
+分箱正态族仍然*分化*：`npnormllw` 比 R 快 4–8×（n=5000 28 ms vs
+120 ms；n=20000 65 ms vs 540 ms）——网格填充 memo（§3）直接服务每轮
+网格扫描，放宽又缩小离网格候选工作；`npnormadw` 缩到 ~0.7×
+（240 ms vs 170 ms，36 → 17 轮）但仍落后——同一 memo 翻搅原因 +
+激进的 `collapse` 重加权；`npnormcvmw` ~0.8×（153 ms vs 110 ms）
+——放宽访问了一个略慢的 basin（其 `ll` 仍在 R 的 band 内，§4c）。
+分箱拟合*确实*付一次 fresh 梯形填充时，两侧用同一位级累加填同一
+矩阵、都调标量 libm `exp`——Eigen 5.0.0 与 R 的 RcppEigen 3.4.0
+都不带 x86 双精度 SIMD `pexp`（两侧 packet 头 grep 证实）——所以
+fresh 填充两侧都受 `exp` 束缚、更宽指令集也救不了；剩下的分箱差距
+是*重填频率*，memo 已为 LL 型扫描消掉它。
+
+\* `npnormadw` 两侧实现都逐次运行不确定（R 13 次运行漂过 6 个
+basin，`ll` 0.17697…0.18252），该比值仅供参考不是结构性的——Py 侧
+较慢的 basin 会把它抬高。
 
 ### 4a. The `npnormND` (N-D normal) exception — k = 2 is the R `npnorm2Dll`
 
@@ -682,6 +837,148 @@ Findings:
   kernel, is the floor) applies, and §4a.2's unrolled kernel could be
   generalized to 3-D later if ever needed.
 
+#### §4a 中文注释
+
+多元正态族（0.3.0 由 R `npnorm2Dll` 泛化为 N 维的 `npnormND`；R 名
+保留为 k = 2 别名）是本移植中**文档化的唯一比 R 慢**的族（k = 2）。
+四条改动把旧 ~28× 差距收窄到参考运行的 ~1.2×：手写展开 2×2 密度
+内核（§4a.2 前段）、显式逆目标函数快路径（§4a.2）、逐格热启动
+（§4a.3）、真方向导数（§4a.4）。R 同款目标函数路径
+（`NPFIC_2D_EXACT`，0.2.x 下同数据 ≈4.3 s）已**在 0.3.0 移除**：
+放宽契约（相似 density、ll 不差于历史版本——从不要求位级一致轨迹）
+使其不再必要，N-D 内核取代了其 Cholesky 路径；下文 fast/exact A/B
+表是该构建的历史记录。
+
+**§4a.1 求解器替换评估（CppNumericalSolvers、NLopt、更广扫描）。**
+被否决的候选均未 vendor 进包（树不加外部依赖）。默认路径自评估后
+*不再*与评估前构建字节一致：契约已放宽为"结果相似、wall 更快"
+（§4a.2 的快路径成为默认）；R 同款轨迹在 0.3.0 移除该路径前可用
+`NPFIC_2D_EXACT=1` 复现。
+
+* **cppoptlib 的 `LbfgsbSolver` 是另一份实现**，不是同一代码的
+  构建：收敛判据是硬编码投影梯度范数 ≤ 1e-4（LBFGSpp 用*未投影*
+  梯度对调用方 `tol` 判）；More–Thuente 线搜索跑在**无约束**函数上
+  （bounds 只在 `findMinimize()` 返回后钳位、事后钳位不重求目标），
+  接受的步与 `fval` 报告都不同；历史更新每轮用稠密 `M.inverse()`
+  重建而非 rank-1/2 递推。n = 2 时这些成本微小，wall 差几乎全来自
+  额外迭代。
+* **实测（n=300 2-D 运行，临时 adapter，测后已移除；基线列是
+  快路径前 Cholesky 内核构建）**：LBFGSpp ≈ 8.2 s / 769,533 次目标
+  求值 vs cppoptlib ≈ 20.1 s / 1,959,715（2.5×）。cppoptlib 最优与
+  R 匹配最优 ll 差 ~3.7e-10——另一个（有效的）局部最优，匹配 R
+  契约视其为轨迹断裂；单次求值成本其实相当（≈10.2 vs ≈10.7 µs），
+  2.4× wall 比就是 2.5× 求值比——收敛策略，不是内核成本。
+* **NLopt**：`LD_LBFGS` 是同一篇 LBFGS-B 论文的 C 移植，每求值多
+  一次 C 回调跳——同一算法行为加跨语言边界，无收敛优势。
+* **更广扫描——没有任何候选既更快又轨迹兼容**：LMBOPT（n = 2 时
+  额外 active-set 机构买不到东西，且发表实现是 MATLAB 非可 vendor
+  的 C++ 核心）；Box L-MQN / 投影梯度族（与 LBFGS-B 同一渐近类，
+  差异在 active-set/box 处理——任何替换都改逐格轨迹与最终最优）；
+  Nelder–Mead / 无导数（O(ε⁻²)、无可比 `tol` 语义，目标光滑且有
+  解析梯度，丢梯度信息严格更差）；混合模型支撑点搜索替代（方向
+  导数筛选、MH 随机候选、支撑缩减 active-set——改的是*选择算法*
+  本身，即按构造改 R 轨迹；且在"每接受格更少的 L-BFGS-B 求值"
+  意义下也没有更快）；cell 级早退调优（vendored LBFGS-B 本就在
+  首步线搜索前、中点投影梯度范数 ≤ tol 时退出——这正是大多数空
+  格便宜的原因；8.2 s 由不退出的格主导，需要真正更便宜的求解——
+  而按上述段落，保持轨迹的不存在）。
+* **`d0`/`d1` 梯度 flag 统一被评估并否决**：每个一维族总请求两个
+  分量，`d0`-only 分支只服务 R `npnorm2Dll` 梯度约定（d0 = 概率
+  方向标量，d1 = 2 个支撑点方向）；合并 flag 是化妆式重构，改不了
+  任何浮点轨迹，单次求值成本由 `dnpnormND` 而非请求子集决定。
+
+**§4a.2 目标函数快路径与放宽契约。** 契约从*与 R 位级一致*放宽到
+*更快、ll/混合与 R 结果相似*后，per-cell 目标对 k = 2 重推（k > 2
+复用同代码 + 通用 `LLT` 内核）：**显式逆二次型**（`dᵀΣ⁻¹d` 用
+`beta` 显式 2×2 逆的系数——构造时预算一次——点积展开，每点 0 次
+除法 vs Cholesky 解的 4 次；归一常数保持 R 的精确分组）；**不变量
+缓存**（`fullden = 1/(dens+precompute)` 与分量 scale 对整轮
+`solvegrad` 是常数，旧代码每次目标求值重算，现缓存在 `setdens`——
+每次拟合省 ≈10⁸ 次除法，值位级一致）；**预分配缓冲 + 同一 SIMD
+exp**（Eigen `array().exp()` 与匹配 R 的核同一指令序列——标量
+`std::exp` 偏 1 ulp 被否决）。实测（参考运行，fast 列即 0.3.0
+构建、与 exact 路径位级复现）：wall 913 ms vs 4295 ms、求值
+216,955 vs 421,810（≈4.2 vs ≈10.2 µs/次）、ll 848.7472072261477 /
+10 轮 / 5 分量 vs 848.7472820349071 / 6 / 5；第二个 n=300 基准同
+比例（≈1.7 s vs ≈8.0 s、316,253 vs 769,533）。~4.5× wall 收益 =
+单次求值快内核（~2.3×）× 每格求值工作 ≈1.9–2.4× 少（§4a.3 热启动
++ 负增益早停、§4a.4 真方向导数）。**相似性实测**：参考运行 10 轮、
+5 分量（0.2.x exact 6 轮），主分量（权重 ≥ 0.02）对 R 位置差 < 0.675
+（0.2.x fast-vs-exact 0.0066）、|Δll| = 0.14 vs R；iterdata 基准
+14 轮 7 分量、0.2.x fast-vs-exact 主分量差 < 0.027、|Δll| = 1.7e-3
+（两路径都优于 R 1.1.0003 的 986.236）。parity 门现查相似性（两次
+运行确定性、迭代数、ll、与 R 的核 parity、与 R 的 density 相似
+rel-L1 < 0.02 与 max |logdiff| < 0.25、主分量邻近 < 0.70）加网格级
+证书 `grid_gain > −1`（§4a.3），而不再是位级一致。**已无逃生舱**：
+`NPFIC_2D_EXACT=1` 随 0.3.0 N-D 泛化移除；k = 2 快轨迹本身与 0.2.3
+位级一致，包内记录的金标无变化。
+
+**§4a.3 逐格热启动与 `grid_gain` 证书（0.2.3 起新增）。** 该族对
+**每个网格单元**启动一个 L-BFGS-B（默认 104×104 2-D 网格即每 sweep
+103×103 = 10,609 格；k 维 (G−1)^k），最初每 sweep 都从格中点起步。
+本构建加两个机制：**温热根 + `f_stop` 早退**——上一轮 `solvegrad`
+该格收敛点（按网格位置键控、跨轮持久——每格每 sweep 都访问）若仍
+在格内则作本轮起点；目标 hook `f_stop = 0` 使该点的*首次*求值兼任
+接受测试：再验证仍为负的温热根一次求值即接受（网格求值与环绕它的
+接受测试坍缩进它），其 warm 条目随后丢弃、下轮从中点重启——§4c
+零成本负点接受推广到逐格极小；收敛非负的温热根是安全热启动（一次
+求值再验证）。联合 §4a.4 实测：每 sweep 接受格工作从 421,810 降到
+216,955 次目标求值（参考运行 1.9×）、769,533 → 316,253（第二基准
+2.4×）。**`grid_gain` 证书抓到一个真实缺陷**：0.2.3 FAST 目标把
+`(n, 2)` 数据按*行主序*读（`data_[2i]`、`data_[2i+1]`）而 Eigen 存
+*列主序*——等于在*被损坏的数据集*上优化（相邻 x 值被配成 (x, y)
+坐标）；`get_ans` 报告的 `grid_gain` 暴露它：参考拟合 ≈ −518、
+3,586 个负格，而两列读对（`data_.col(0)`/`data_.col(1)`）后 ≈ +4.7e-3、
+0 负格（真梯度前构建为 +7.2e-7）。该族相似性 band（0.2.x
+`dmu < 0.08`；0.3.0 对 R `dmu < 0.70`）本会*漏掉*该缺陷——损坏拟合
+的主分量仍落在未损坏拟合 ≈0.06 内——故 `tests/verify_2d_same.py`
+现在也在 `grid_gain < −1` 时失败。修复后独立 numpy 重算证书（公开
+内核、全部 (G−1)² 格中点）与 C++ 值差 < 1e-13。**2-D 核列缓存被
+评估并否决**：一维列缓存（§3）成立是因为支撑根在可预算的网格+精化
+集上；2-D 格是二维区域、L-BFGS-B 线搜索求值任意*内部*点，逐格列
+缓存只能覆盖很小比例——答案是单次求值快内核（§4a.2）。
+
+**§4a.4 真方向导数（本构建新增）。** per-cell 目标是格的*gain*
+`g(μ) = (dens(μ) − K(μ)) / F`，`K` 为未归一化 KDE、`F = dens +
+precompute`（对 μ 常数）。L-BFGS-B 需要 `g` 沿搜索方向的方向导数；
+R 包及原移植传的是 `B·Σ t_i(μ − x_i) = −∇_μ K(μ)`——未归一化 KDE
+的梯度，不是 gain 的，仅当 `1/F` 近似为常数时与 `∇_μ g` 成比例；
+一般情形 L-BFGS-B 追的是 gain 目标的 *KDE 方向*。一维 `d1` 族做对
+了——其 `a1` 就是 `dg/dμ`（每点按 `1/F_i` 加权）。现在 `operator()`
+改为累加加权和 `Σ (t_i/F_i)(μ − x_i)`（pass 3 每点 ≈3 个额外
+FLOP——`t_i` 与 `1/F_i` 在目标 pass 已热；k > 2 同式、`B` 为 k×k
+权重矩阵）；目标算术（`ansd0`）保持位级一致，所有值判定
+（`fval < 0`、`f_stop`、`grid_gain`）不变。两个效果：**轨迹变好**
+——参考拟合 ll 848.7479272517137（6 轮）→ 848.7472072261477
+（10 轮），距 exact 路径更近（|Δll| 6.4e-4 → 7.5e-5），逐格求值
+工作随之降（参考 352,940 → 216,955；第二基准 642,681 → 316,253）；
+**`LBFGSB.h` 的过期曲率守卫**——梯度不再等于 −∇K 后 BFGS 曲率历史
+可过期、Cauchy/子空间方向停止下降，使线搜索抛
+"the moving direction does not decrease the objective function
+value"；应用 L-BFGS-B 标准补救：`grad·d >= 0` 时重置 BFGS 历史并
+取最速下降方向（`grad ≠ 0` 时必下降，此处有保证——收敛判据只在
+`projgnorm <= epsilon <= ||grad||` 时返回）。守卫对从不卡壳的轨迹
+不激活，只在曲率历史真的过期时触发。
+
+**§4a.5 N-D（k > 2）性能与张量积网格成本（0.3.0）。** 本构建 profile
+（`n=360`、3 高斯生成器数据 `tests/parity_3d.csv`，3–5 次中位数）：
+k=2 默认 104 点/轴（103² = 10,609 格）≈913 ms / 216,955 次求值 /
+≈4.2 µs；k=3 显式 18 点/轴（17³ = 4,913 格）≈2.05 s / 301,910 /
+≈6.8 µs；k=3 显式 12 点/轴（11³ = 1,331 格）≈617 ms / 54,895 /
+≈11.2 µs。结论：**wall 就是逐格 L-BFGS-B 求值数**（计数 ≈
+(G−1)^k × 接受比例；k=3 每格 ≈61.4 次 vs k=2 ≈20.5——k=3 数据更
+难，更宽更平的 gain basin 让更多格不早退）；**单次求值成本随网格
+变粗而升高**（11.2 vs 6.8 µs）——大格是更难 box 约束子问题（线搜索
+步多、中点早退少触发），故 wall 对网格分辨率呈 U 形：太细 → 格太
+多、太粗 → 每格工作太多，n ≈ 360 / 3 分量情形 15–20 点/轴最甜；
+**默认网格对 k ≥ 3 太大**——每轴 pad 到最长 marginal（k=3 ≈104
+点）即 103³ ≈ 1.1 M 格，应显式传 `gridpoints`（18 点/轴：4,913 格、
+2.05 s）；**张量积开销本身很小**——网格一次物化（L × k 个 double）、
+warm-start 映射每格一项、k-D `LLT` 核比展开 k=2 快路径每点贵 ≈2.5×
+（12 flops + 4 除法 → 通用 Cholesky 解，见 6.8 vs 4.2 µs）；k > 2
+内核未再微优化（§4a.1 结论——L-BFGS-B 机构而非内核是 floor——
+适用），§4a.2 的展开内核日后如有需要可推广到 3-D。
+
 ### 4b. Support-point hot start (the `NPFIC_WARM` experiment; the knob
 was removed in 0.2.3 — see §4c)
 
@@ -745,6 +1042,41 @@ data/initial mix/grid/tol, median of 5):
   above are historical — recorded on the 0.2.2 build where the knob
   existed (`tests/bench_warm_ab.py` still runs, but every arm now
   behaves identically, the environment variable is no longer read).
+
+#### §4b 中文注释
+
+网格在求解器生命周期内固定，所以每轮外层迭代在**同一批**变号区间
+（d1）/三元组（d0）上、以*略不同*的梯度搜索。`NPFIC_WARM` 利用
+这一点：上一轮调用对某区间的精化根（按网格位置稳定索引）在下轮
+复用。两支实测（`tests/bench_warm_ab.py`，每用例 n=5000、
+`order=-3`、同数据/初始混合/网格/tol、5 次中位数）：
+
+* **`NPFIC_WARM=1`——seed（保质量）**：上轮根作为 `brmin`/`dfmin`
+  的*第一个内部点*；搜索仍收敛到新梯度的真根，找到的支撑集不变
+  ——只有核列求值数下降（近根的 seed 缩小 Brent 括号、替换
+  `dfmin` 首个抛物步）。实测 1.05–1.23×（`npnormcll` 最大 1.23×
+  ——`d0`/NNLS 重的用例精化候选最多；`npnormad` 1.05%、`nppoisll`
+  1.09% 最小——搜索本就便宜或根本没有核列）。ll 一致在外层 `tol`
+  尺度（1e-6）以内——按构造两臂解到同一容差的同一问题；六个用例
+  中五个实际上 ~1e-9 位级一致。
+* **`NPFIC_WARM=2`——激进（CNM 工作集再校验；仅作 A/B 参考）**：
+  上轮根用**一次**梯度值求值再验证、仍为负即接受、跳过整个搜索
+  ——CNM 方案（Wang 2007 *Statistical Modelling*；Wang & Taylor
+  2013 *JCGS*）的列生成工作集热启动。实测最高 2.39×
+  （`npnormcll` 3221 → 1346 ms、61 → 39 轮），但支撑根在外轮之间
+  漂移时质量不保：`npnormll` 落到较差最优（ll +4.16e-2、density
+  相对差 4.9e-3）、`npnormad` +1.7e-3，`nptllw` 甚至*变慢*
+  （0.83×——接受的过期根改变权重轨迹、增加迭代）。违反包
+  "估计的 ll 不得劣于历史（出货）结果"的验收规则，故保留为实验
+  臂、不作默认。
+* **0.2.3：旋钮移除——`=2` 臂行为常开。** 放宽验收契约（density
+  容忍内一致、ll 不差于历史版本、相似而非匹配 R 轨迹的最优）下，
+  当初让 `=2` 留在实验区的质量异议（支撑根漂移处的略不同局部最优）
+  不再构成阻碍。0.2.3 引擎把整个支撑点搜索放宽（§4c——CNM 再
+  校验 + 零成本负网格接受 + 负增益早停）设为默认，10 个 parity
+  套件在重录轨迹上全部 `TOTAL BAD: 0`。上表为历史记录（记录于
+  旋钮尚存的 0.2.2 构建；`tests/bench_warm_ab.py` 仍跑，但所有臂
+  行为已相同，环境变量不再被读取）。
 
 ### 4c. 0.2.3 — the relaxed support search (always on; measured)
 
@@ -825,6 +1157,56 @@ The gradient-evaluation drop at n=5000, n=1000: `nptll` β=5
   hit the threshold), so the KKT certificate does not apply to it; the
   parity gates check its statistic hit, not `min_gradient`.
 
+#### §4c 中文注释
+
+0.2.2 引擎在每个变号区间（d1）/三元组（d0）内搜索 gain 的*精确*
+最小值。0.2.3 做三个放宽，利用"搜索只需要*找一个负点*"这一事实
+——调用方的符号过滤接受其中任意一个：
+
+1. **零成本负网格接受**：网格扫描本就已（由缓存网格核免费地）求出
+   每个网格点的 gain；若区间端点——或三元组的中网格点——增益已经
+   为负，该网格点就是零额外求值的有效新支撑点；该区间的温热根
+   保留给后续调用。0.2.3 之前每个这样的区间仍会跑完整精化。
+2. **CNM 工作集再校验（旧 `NPFIC_WARM=2` 臂）**：对剩余区间，上一
+   轮的精化根用**一次**梯度求值再验证、仍为负即接受——完全跳过
+   精化。
+3. **`brmin`/`dfmin` 内负增益早停**：精化在*任一*求值点增益为负时
+   立即返回（`d1` 检查搭同一核列的便车；`d0` 检查就是抛物点本身）。
+
+每个被接受点仍是*有效*新支撑点（负增益 ⟹ 外层迭代降损失）；`Npmix`
+结果新增 **`grid_gain`** 字段——最终估计上*全部*网格点的最小增益，
+证书被暴露而非隐藏：`min_gradient`（支撑方向）+ `grid_gain`（网格
+方向）共同证明网格内无负方向；`grid_gain` 依赖网格分辨率、可合法
+略负（实测 `npnormcvm` −8.2e-4、`npnormadw` −2.8e-3），故验收门是
+`min_gradient ≥ -1e-4`，`grid_gain` 供参考。
+
+**wall 效果**（同数据/初始化/网格/tol，5 次中位数）：`nptll` β=5
+n=5000 2957 → **857 ms**（3.5×，31 → 11 轮）；`nptllw` β=5
+2.01 s → **559 ms**（3.6×）；`nppoisll` 3.7×；`npnormll` n=1000
+1.9×；`npnormllw` 1.3×；`npnormadw` 1.6×（36 → 17 轮）；
+**`npnormcll` 0.8×（1009 → 1269 ms，19 → 31 轮）——唯一变慢的
+族**。n=5000/1000 的梯度求值变化：`nptll` β=5 3733 → 1191 次、
+455 → 61 fresh 列（§1）；`npnormcll` 21043 → 24425（反向——见下）。
+
+**质量效果（已记录、parity 门已验证）**：
+
+* 多数族落在**更好或相等**的 ll：t 族与未分箱正态的 ll 与 0.2.2
+  差 ~1e-6（外层 `tol` 尺度）或更好；分箱族与 R 在既有 BAND 内一致
+  （R 在 `npnormcvmw`/`npnormadw` 上本身不确定）。唯一记录例外是
+  `npnormcll`（平坦相关景观有 6e-5 尺度的 basin，basin 选择不被
+  容差标识）：0.2.3 拟合比 0.2.2 拟合好 4.8e-6（相对），但比 R 的
+  从零最优差 5.5e-5（ll −60.20387 vs −60.20717、107 vs 92 支撑
+  点）——另一个有效最优，由 `min_gradient ≥ -1e-4`（无负方向）+
+  记录轨迹 GOLD（`tests/verify_cvmadcll.py`）把关。
+* 代价：放宽接受*任意*负点，所以在平坦、近相等的 basin 景观上可能
+  停在比精确最小搜索**不同的有效最优**——`npnormcvm` 落在 R 观察
+  band 上方 8.4e-6（R 自身跨运行漂 1.5e-5）、`npnormcll` 访问
+  107 点支撑集（vs 92）用 31 轮，因此它是 0.2.3 *变慢*的那一族。
+  10 个 parity 套件在重录的确定性轨迹上 `TOTAL BAD: 0`。
+* `estpi0`（目标统计量二分）精神上不受影响：其最终混合不是自由
+  最优（把点质量权重钉住以命中阈值），KKT 证书不适用；parity 门
+  查它的统计量命中而非 `min_gradient`。
+
 ## 5. What was *not* done, and why
 
 * **Capping the per-candidate refinement (`NPFIC_REFINE_STEPS`) —
@@ -876,6 +1258,33 @@ The gradient-evaluation drop at n=5000, n=1000: `nptll` β=5
   because a bit-exactness hazard with a plausible API is worse than a
   missed optimization.
 
+#### §5 中文注释
+
+* **限制每候选精化步数（`NPFIC_REFINE_STEPS`）——已 A/B 实测，保留为
+  实验旋钮，默认不变。** 假设：给 `brmin`/`dfmin` 内每候选的精化
+  步数设上限（"每步更少工作"）省下的 wall 多于额外外轮的成本。
+  n=30000、同数据/初始点/网格/tol 的 A/B（`tests/refine_ab.py`；
+  求值数经 `tests/refine_ab_evals.py` 的 PROFILE 行，每臂独立子
+  进程、3 次计时取中位数）：2 轮的 `nptll` β=3 在位级一致 ll 下只
+  得 ~1–7%（精化相对 3 万点 `dnt` 列本就便宜）；`npnormll` β=1 展
+  示另一面——cap=2 要 60 轮（2.2× wall）、cap=1 漂出轨迹（不同 k
+  与 ll）。没有一臂统一胜过出货行为；默认保持 `-1`（不限制）；
+  旋钮保留供后续实验，且 `NPFIXEDCOMPY_PROFILE` 行现报告
+  `solvegrad` 求值数（`evals=`）使此类实验可测。表记录于 0.2.2
+  精确最小搜索；在 0.2.3 放宽搜索（§4c）下精化通常被跳过或截
+  断，cap 很少绑定——旋钮仍在，但效果已次于放宽本身。
+* **手写 OpenMP**——全部移除（见 §2）；它是崩溃/确定性隐患，收益
+  已由缓存位级安全地重新获得。
+* **把剩余工作线程化**——剩余两个热点（`solvegrad` 中离网格 `dnt`
+  求值、`weights` 中 NNLS）对 `n` 是平凡可并行的，但按设计约束保持
+  串行（无手写 OpenMP；只有 Eigen 编译期门控的并行 GEMM/GEMV
+  参与）。对 R 的实测加速本就来自 SIMD + 缓存。
+* **几何级数填充捷径（否决）**——把 `D(x; μ−kδ)` 填成
+  `D(x; μ)·rᵏ` 在分箱梯形上快 ~2.3×，但代数上是错的：`log D` 对
+  `k` 是二次的，比值 `D_{k+1}/D_k` 不是常数。parity 门抓住了它
+  产生的系统性 1.2e-4 `ll` 偏移；该分支被*删除*而非降级——一个
+  有合理 API 的位级一致隐患比一个错失的优化更糟。
+
 ## 6. Reproducing the evidence
 
 ```bat
@@ -914,3 +1323,28 @@ self-consistency, since there is no R reference for k = 3.
 `Rscript bench_2d_r.R` (R), both reading the shared `parity_2d.csv`.
 The §4a.2 fast-path median comes from `tests/measure_2d.py`;
 `NPFIXEDCOMPY_PROFILE=1` on the run prints the `objevals` line.
+
+#### §6 中文注释
+
+复现入口（脚本均见上代码块）：`tests/perf_baseline.py`（未分箱
+wall 表）、`tests/bench_binned.py`（分箱 wall 表）、
+`tests/reprofile_phases.py`（重测 §1 分阶段表）、
+`tests/refine_ab.py` / `tests/refine_ab_evals.py`（
+`NPFIC_REFINE_STEPS` A/B：wall/迭代/ll 与 PROFILE 行的 evals）、
+`tests/bench_warm_ab.py`（历史 `NPFIC_WARM` A/B，§4b；0.2.3 起各臂
+相同）；`NPFIXEDCOMPY_PROFILE=1` 运行向 stderr 打分阶段计时行
+（含 `evals=`）。R 参考时间：`tests/bench_r.R` /
+`bench_binned_r.R`（Rscript）。
+
+parity 门（全部须 `TOTAL BAD: 0`，代码块见上）：
+`tests/verify_kernels.py` 携带 30 例 1-D/2-D 核金标集
+（`ref_new.txt` + R 导出输入，对照活体 R 4.6.1 记录）；
+`tests/verify_2d_same.py` 携带 `npnorm2Dll` 金标集（`parity_2d.csv`、
+`grid_2d.csv`、初始混合、R 最终点 `r3_pts_2d.csv` / `r3_pr_2d.txt`，
+由 `C:\...\rebuild\verify2d.R` 记录）；`tests/verify_3d.py` 携带 3-D
+`npnormND` 金标集（`parity_3d.csv`、显式 18³ 网格）——k = 3 无 R
+参考，故走结构 + 自洽门。2-D wall 时间：
+`.venv\Scripts\python.exe bench_2d.py`（Py）与
+`Rscript bench_2d_r.R`（R），共读 `parity_2d.csv`；§4a.2 快路径
+中位数来自 `tests/measure_2d.py`，运行加 `NPFIXEDCOMPY_PROFILE=1`
+打印 `objevals` 行。
