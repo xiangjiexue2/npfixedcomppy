@@ -224,6 +224,29 @@ removed.**
   ≈ 103³ ≈ 1.1 M cells — pass a coarser explicit `gridpoints` for
   k ≥ 3 (see `docs/PERF.md` §4a).
 
+* **`covestEB`: selectable mixing-fit loss — `loss="mle" | "cvm" |
+  "ad"` (default `"mle"`)** — the Empirical-Bayes covariance entry
+  point now fits the non-parametric mixing distribution on the
+  Fisher-transformed correlations with a selectable criterion:
+  `"mle"` (non-parametric maximum likelihood, `npnormll` /
+  `npnormllw` — the R `covestEB` behaviour; the default path is
+  bit-identical to before), `"cvm"` (Cramer–von Mises distance,
+  `npnormcvm` / `npnormcvmw`), `"ad"` (Anderson–Darling distance,
+  `npnormad` / `npnormadw`). The binned (`"...w"`) variant follows
+  automatically once the pairwise-correlation count exceeds 5000
+  (`force_nonbin` still overrides). With `estpi0=True` the point-mass
+  threshold follows the criterion: `val = 1` for `"mle"` (the R
+  value), `0.1` for `"cvm"`, `1` for `"ad"` (the recommended
+  R-package thresholds). Self-contained gate:
+  `tests/verify_coveb_loss.py`.
+
+* **Fix: `covestEB(..., estpi0=True)` was broken** — the boolean
+  `estpi0` parameter shadowed the module-level `estpi0()` function
+  inside the function body, so the R `covestEB` `estpi0 = TRUE` path
+  raised `TypeError: 'bool' object is not callable`. The inner call
+  now goes through an unshadowed module alias; the path is exercised
+  in `tests/verify_coveb_loss.py`.
+
 * **Build: no ISA flags (the `NPFIC_ARCH` knob is removed)** — the
   extension now compiles with the plain compiler baseline on every
   platform (MSVC `/std:c++17 /O2`, GCC/Clang `-std=c++17 -O3`), with
@@ -247,8 +270,12 @@ removed.**
   no worse than R, `grid_gain > −1`); new `tests/verify_3d.py` pins
   the 3-D trajectory (determinism, self-consistency recomputed with
   the public `dnpnormND` kernel, the `grid_gain` certificate, main
-  components near the three known generator modes). All eleven parity
-  suites report `TOTAL BAD: 0`.
+  components near the three known generator modes); new
+  `tests/verify_coveb_loss.py` pins the selectable `covestEB` loss
+  criterion (default-vs-`"mle"` bit-identity, per-criterion PSD /
+  unit-diagonal / determinism, the three criteria yielding distinct
+  fits, unknown loss rejected). All twelve test suites report
+  `TOTAL BAD: 0`.
 
 Version sources bumped to `0.3.0` (`pyproject.toml` single source,
 `setup.py` mirrored; the compiled extension reports `0.3.0`).
@@ -324,7 +351,8 @@ build is 0.3.0. The 0.2.3 1-D engine, goldens, and the numbers above
 carry over unchanged to 0.3.0, which only generalized the 2-D family to
 N-D (`npnormND`) and removed the `NPFIC_2D_EXACT` objective path (see
 "What's new in 0.3.0" above). The "ten parity suites" count is the
-0.2.3 set — `tests/verify_3d.py` joined it in 0.3.0, making eleven.*
+0.2.3 set — `tests/verify_3d.py` and `tests/verify_coveb_loss.py`
+joined it in 0.3.0, making twelve.*
 
 ### 0.3.0 更新内容（相对 0.2.3）
 
@@ -374,6 +402,24 @@ N-D (`npnormND`) and removed the `NPFIC_2D_EXACT` objective path (see
   网格约为 103³ ≈ 110 万格——k ≥ 3 请显式传较粗的 `gridpoints`
   （见 `docs/PERF.md` §4a）。
 
+* **`covestEB`：可选混合拟合判据——`loss="mle" | "cvm" | "ad"`（默认
+  `"mle"`）**——经验贝叶斯协方差入口现在可以在 Fisher 变换后的相关
+  系数上用可选判据拟合非参数混合分布：`"mle"`（非参数极大似然，
+  `npnormll` / `npnormllw`——R `covestEB` 的原始行为，默认路径逐位
+  不变）、`"cvm"`（Cramér–von Mises 距离，`npnormcvm` /
+  `npnormcvmw`）、`"ad"`（Anderson–Darling 距离，`npnormad` /
+  `npnormadw`）。成对相关数超过 5000 时自动跟随分箱（`"...w"`）
+  变体（`force_nonbin` 仍可强制不分箱）。`estpi0=True` 时点质量
+  阈值随判据而变：`"mle"` 用 `val = 1`（R 原值）、`"cvm"` 用
+  `0.1`、`"ad"` 用 `1`（R 包推荐阈值）。自包含门：
+  `tests/verify_coveb_loss.py`。
+
+* **修复：`covestEB(..., estpi0=True)` 原本不可用** —— 布尔参数
+  `estpi0` 在函数体内遮蔽了模块级 `estpi0()` 函数，R `covestEB` 的
+  `estpi0 = TRUE` 路径抛 `TypeError: 'bool' object is not callable`。
+  内层调用改经无遮蔽的模块别名；该路径由
+  `tests/verify_coveb_loss.py` 验证。
+
 * **构建：不传 ISA 参数（`NPFIC_ARCH` 开关移除）**——扩展现在在所有
   平台都用纯编译器基线编译（MSVC `/std:c++17 /O2`、GCC/Clang
   `-std=c++17 -O3`），不带 `/arch:*` / `-march` / `-mavx*`：固定 ISA
@@ -391,8 +437,11 @@ N-D (`npnormND`) and removed the `NPFIC_2D_EXACT` objective path (see
   （rel-L1 < 0.02、max |log-density| 差 < 0.25、主成分位置差 0.70
   内、`ll` 不劣于 R、`grid_gain > −1`）；新增 `tests/verify_3d.py`
   固定 3-D 轨迹（确定性、用公开 `dnpnormND` 核重算的自洽、
-  `grid_gain` 证书、主成分贴近三个已知生成器模态）。全部 11 个
-  parity 套件报告 `TOTAL BAD: 0`。
+  `grid_gain` 证书、主成分贴近三个已知生成器模态）；新增
+  `tests/verify_coveb_loss.py` 固定可选的 `covestEB` 拟合判据（默认
+  与 `"mle"` 逐位一致、各判据 PSD / 单位对角 / 确定性、三判据拟合
+  两两互异、未知 loss 拒绝）。全部 12 个测试套件报告
+  `TOTAL BAD: 0`。
 
 版本源升到 `0.3.0`（`pyproject.toml` 为唯一源、`setup.py` 同步；
 编译扩展报告 `0.3.0`）。
@@ -454,7 +503,8 @@ N-D (`npnormND`) and removed the `NPFIC_2D_EXACT` objective path (see
 金标与上文数字在 0.3.0 中不变地沿用，0.3.0 仅把 2-D 族泛化为 N-D
 （`npnormND`）并移除了 `NPFIC_2D_EXACT` 目标函数路径（见上文
 "0.3.0 更新内容"）。"10 个 parity 套件"是 0.2.3 时的集合——
-`tests/verify_3d.py` 在 0.3.0 加入后为 11 个。*
+0.3.0 加入 `tests/verify_3d.py` 与 `tests/verify_coveb_loss.py`
+后为 12 个。*
 
 ## 2. What's new in 0.2.2 (vs 0.2.1)
 
@@ -733,7 +783,8 @@ build is 0.3.0. The 2-D family introduced here was named
 `npnorm2Dll`; 0.3.0 generalized it to N dimensions as `npnormND`
 (keeping `npnorm2Dll` as the k = 2 alias) and removed the
 `NPFIC_2D_EXACT` objective path. The "ten parity suites" count is the
-0.2.1 set — `tests/verify_3d.py` joined it in 0.3.0, making eleven.*
+0.2.1 set — `tests/verify_3d.py` and `tests/verify_coveb_loss.py`
+joined it in 0.3.0, making twelve.*
 
 ### 0.2.1 更新内容（相对 0.2.0）
 
@@ -879,8 +930,8 @@ n = 2 重新推导：
 *历史注记：本节描述 0.2.1 构建；当前构建为 0.3.0。本节的 2-D 族当时
 名为 `npnorm2Dll`；0.3.0 把它泛化为 N 维的 `npnormND`（保留
 `npnorm2Dll` 为 k = 2 别名）并移除了 `NPFIC_2D_EXACT` 目标函数路径。
-"10 个 parity 套件"是 0.2.1 时的集合——`tests/verify_3d.py` 在 0.3.0
-加入后为 11 个。*
+"10 个 parity 套件"是 0.2.1 时的集合——0.3.0 加入
+`tests/verify_3d.py` 与 `tests/verify_coveb_loss.py` 后为 12 个。*
 
 ### What's new in 0.2.0 (vs 0.1.0)
 
@@ -1166,8 +1217,10 @@ faster while preserving the `tol` guarantee on the statistic;
 
 Also exported for the R-package correspondence layer: `posteriormean`,
 `covestEB`, `covestEB_cor` (`CovEBResult`), the `FAMILIES` registry, and
-`__version__`. See the module docstrings in `python/npfixedcomppy/` for
-the full parameter reference.
+`__version__`. Beyond the R surface, `covestEB` accepts a selectable
+mixing-fit criterion `loss="mle" | "cvm" | "ad"` (default `"mle"`, the
+R behaviour; the binned variant follows automatically). See the module
+docstrings in `python/npfixedcomppy/` for the full parameter reference.
 
 **Mixture density / cdf kernels (the R `dnp*` / `pnp*` layer)** — all run
 in the C++/Eigen core, take array-like `x`/`mu0`/`pi0`, and return an
@@ -1244,7 +1297,9 @@ inner_tol=1e-4) -> Npmix`**
 | `convergence`  | 0 = 达到容差，1 = 达到 `maxit`                               |
 
 另导出 R 包对应层用的 `posteriormean`、`covestEB`、`covestEB_cor`
-（`CovEBResult`）、`FAMILIES` 注册表与 `__version__`。完整参数说明见
+（`CovEBResult`）、`FAMILIES` 注册表与 `__version__`。R 接口之外，
+`covestEB` 另接受可选拟合判据 `loss="mle" | "cvm" | "ad"`（默认
+`"mle"`，即 R 行为；分箱变体自动跟随）。完整参数说明见
 `python/npfixedcomppy/` 中的模块 docstring。
 
 **混合密度 / 分布函数核（R 的 `dnp*` / `pnp*` 层）** —— 全部运行于
@@ -1304,6 +1359,13 @@ exits non-zero on failure):
   the inner npnormcll fit to a different valid support set and the
   posterior mean amplifies the support-point drift — the R-exact
   pipeline is strictly gated at 1e-10 in pipeline E).
+- `python tests\verify_coveb_loss.py` — the selectable `covestEB`
+  mixing-fit criterion (`loss="mle" | "cvm" | "ad"`), self-contained
+  (no R reference): the default call is bit-identical to
+  `loss="mle"` (plain and estpi0 paths), each criterion × estpi0
+  returns a valid estimate (symmetric, PSD after deflation,
+  sample-variance diagonal), results deterministic and pairwise
+  distinct across the three criteria, unknown loss rejected.
 - `python tests\verify_posteriormean.py` — posterior means of `fun(pt)`
   against R-recorded values (strict 1e-9 on the pure kernel path; the
   refit-based cases at 1e-2, the 0.2.3 relaxation moves the
@@ -1328,7 +1390,7 @@ exits non-zero on failure):
 - `python tests\bench_binned.py` — wall-time bench for the binned
   families (the R-side counterpart is `tests\bench_binned_r.R`).
 
-All eleven parity suites must report `TOTAL BAD: 0`. The package is
+All twelve test suites must report `TOTAL BAD: 0`. The package is
 **deterministic per build**: for a fixed build and a fixed
 `OMP_NUM_THREADS`, identical inputs produce bit-identical outputs (unlike
 the R package on parallel platforms).
@@ -1359,6 +1421,11 @@ the R package on parallel platforms).
   R 录制的中间量（投影基元严格门；端到端管线 5e-1——0.2.3 的放宽
   搜索把内层 npnormcll 拟合挪到另一个有效支撑集，后验均值放大了
   支撑点漂移；R 精确管线在 pipeline E 以 1e-10 严格把关）。
+- `python tests\verify_coveb_loss.py` — `covestEB` 可选拟合判据
+  （`loss="mle" | "cvm" | "ad"`），自包含（无需 R 参考）：默认调用
+  与 `loss="mle"` 逐位一致（普通与 estpi0 两条路径）、各判据 ×
+  estpi0 均返回合法估计（对称、缩放下 PSD、样本方差对角）、结果
+  确定且三判据两两互异、未知 loss 拒绝。
 - `python tests\verify_posteriormean.py` — `fun(pt)` 的后验均值对比
   R 录制的值（纯核路径严格 1e-9；基于 refit 的用例 1e-2——0.2.3
   的放宽使确定性 refit 的一个支撑点移动 ~2e-3）。
@@ -1378,7 +1445,7 @@ the R package on parallel platforms).
 - `python tests\bench_binned.py` — 分箱族耗时 bench（R 侧对应脚本为
   `tests\bench_binned_r.R`）。
 
-十一个 parity 套件必须全部报告 `TOTAL BAD: 0`。本包对**给定构建与线程数**
+十二个测试套件必须全部报告 `TOTAL BAD: 0`。本包对**给定构建与线程数**
 是确定性的：相同输入恒产生逐位相同的输出（并行平台上的 R 包做不到这一
 点）。
 

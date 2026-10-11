@@ -1321,7 +1321,7 @@ t/Poisson/CLL/AD/分箱/N-D 族不受影响。soundness：独立数值 harness
 （唯一到达 CNM 阶段的候选区间被证书判正且确实安全）。引擎级：
 开关证书跑 npnormll 套件（computemixdist / n=5000 / 固定分量 /
 estpi0），ll/pt/pr/iter/min_gradient/grid_gain **位级一致**（门
-只跳过可证明为正的区间）；`run_all_verify.py` 全套 11 个套件
+只跳过可证明为正的区间）；`run_all_verify.py` 全套 12 个套件
 `TOTAL BAD: 0`。
 
 实测：在当前基准数据上证书**从不触发**（4 个 npnormll 基准运行

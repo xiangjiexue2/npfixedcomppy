@@ -953,12 +953,31 @@ def _corr_from_cov(covest: np.ndarray) -> np.ndarray:
     return covest / np.outer(sd, sd)
 
 
+#: Mixing-fit loss criteria selectable in :func:`covestEB`, mapped to the
+#: ``npnorm*`` family suffix ("mle" -> "ll" keeps the R package's family
+#: naming).  "mle" is the R ``covestEB`` behaviour (non-parametric maximum
+#: likelihood) and the default.
+_COVESTEB_LOSS_SUFFIX = {"mle": "ll", "cvm": "cvm", "ad": "ad"}
+
+#: Point-mass-at-zero test threshold (``estpi0`` ``val``) per loss criterion:
+#: "mle" keeps the R ``covestEB`` value; "cvm"/"ad" use the recommended
+#: thresholds of the R package examples (see :func:`estpi0`).
+_COVESTEB_PI0_VAL = {"mle": 1.0, "cvm": 0.1, "ad": 1.0}
+
+# Module-level alias for the estpi0() function: covestEB's ``estpi0`` boolean
+# parameter shadows the module name inside the function body, so the
+# estpi0=True path must call the function through this unshadowed alias
+# (previously the estpi0=True path raised ``'bool' object is not callable``).
+_estpi0 = estpi0
+
+
 def covestEB(
     X: Sequence[Sequence[float]],
     estpi0: bool = False,
     order: int = -3,
     verbose: bool = False,
     force_nonbin: bool = False,
+    loss: str = "mle",
 ) -> CovEBResult:
     """Estimate a covariance matrix using Empirical Bayes (Fisher transform).
 
@@ -976,15 +995,31 @@ def covestEB(
         An ``n x p`` matrix (rows = observations, columns = variables).
     estpi0 : bool, default ``False``
         If ``True``, fit with ``estpi0`` (the point-mass proportion at the
-        null is estimated to the threshold ``val = 1``) rather than
-        ``computemixdist``.
+        null is estimated to the loss-specific threshold, see ``loss``)
+        rather than ``computemixdist``.
     order : int, default ``-3``
         Binning level used only when the number of pairwise correlations
-        exceeds 5000 (the binned ``npnormllw`` family).
+        exceeds 5000 (the binned family of the selected ``loss``).
     verbose : bool, default ``False``
         Passed through to the inner fit.
     force_nonbin : bool, default ``False``
         If ``True``, use the non-binned fit even for very large ``p``.
+    loss : str, default ``"mle"``
+        The criterion the non-parametric mixing distribution is fit with on
+        the Fisher-transformed correlations:
+
+        * ``"mle"`` — non-parametric maximum likelihood (family
+          ``npnormll`` / ``npnormllw``); the R ``covestEB`` behaviour and
+          the default;
+        * ``"cvm"`` — Cramer-von Mises distance (``npnormcvm`` /
+          ``npnormcvmw``);
+        * ``"ad"`` — Anderson-Darling distance (``npnormad`` /
+          ``npnormadw``).
+
+        With ``estpi0=True`` the point-mass-at-zero threshold follows the
+        criterion: ``val = 1`` for ``"mle"`` (the R value), ``0.1`` for
+        ``"cvm"`` and ``1`` for ``"ad"`` (the recommended thresholds of the
+        R package examples; see :func:`estpi0`).
 
     Returns
     -------
@@ -1002,6 +1037,11 @@ def covestEB(
     if A.ndim != 2:
         raise ValueError("covestEB: X must be a 2-D matrix (n x p)")
     n, p = A.shape
+    if loss not in _COVESTEB_LOSS_SUFFIX:
+        raise ValueError(
+            f"covestEB: unknown loss {loss!r}; "
+            f"expected one of {sorted(_COVESTEB_LOSS_SUFFIX)}"
+        )
     covest = np.cov(A, rowvar=False, ddof=1)
     index = np.diag(covest) > _MACHINE_EPS
     p2 = int(index.sum())
@@ -1012,18 +1052,13 @@ def covestEB(
     v = int(verbose)
 
     use_bin = (len(fisherdata) > 5000) and (not force_nonbin)
+    method = "npnorm" + _COVESTEB_LOSS_SUFFIX[loss] + ("w" if use_bin else "")
     if estpi0:
-        if use_bin:
-            r = estpi0(fisherdata, method="npnormllw", order=order,
-                       beta=beta, verbose=v, val=1.0)
-        else:
-            r = estpi0(fisherdata, beta=beta, verbose=v, val=1.0)
+        r = _estpi0(fisherdata, method=method, order=order, beta=beta,
+                    verbose=v, val=_COVESTEB_PI0_VAL[loss])
     else:
-        if use_bin:
-            r = computemixdist(fisherdata, method="npnormllw", order=order,
-                               beta=beta, verbose=v)
-        else:
-            r = computemixdist(fisherdata, beta=beta, verbose=v)
+        r = computemixdist(fisherdata, method=method, order=order,
+                           beta=beta, verbose=v)
 
     postmean = posteriormean(fisherdata, r, fun=np.tanh)
     ans = np.eye(p)
