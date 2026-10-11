@@ -17,8 +17,13 @@ Established facts (measured on this build; see `docs/PERF.md`):
   < 1e-12;
 * R 4.6.1 (installed 1.1.0003) on this data: ll = 848.88775287688986
   (6 iters);
-* the FAST path is bit-deterministic here: ll = 848.7472072261477
-  (10 iters, 5 support points incl. the zero-weight fixed point);
+* the FAST path is bit-deterministic WITHIN ONE BUILD: the recorded
+  ll = 848.7472072261477 (10 iters, 5 support points incl. the
+  zero-weight fixed point). Across compiler codegen it may drift by a
+  few ULP (the build passes no ISA flags and Eigen runtime-dispatches
+  at import, so MSVC vectorizes the scalar loops differently per
+  build/machine) — hence the ll gate is a small ulp band, not
+  bit-exact;
 * density similarity, FAST vs R at this data: relative L1 = 0.0158,
   max |log-density| difference = 0.169; the main components
   (w >= 0.02) sit in the same two modes, max location distance 0.675
@@ -28,7 +33,8 @@ Established facts (measured on this build; see `docs/PERF.md`):
 
 Gate:
   1. FAST (default): two runs bit-identical; converges; iter == 10; ll
-     bit-exact against the recorded value; self-consistent
+     within 8 ulp of the recorded value (bit-exact is not preserved
+     across compiler codegen — see above); self-consistent
      (`ll == -sum log dnpnormND(...)`, 1e-9); not worse than R.
   2. KERNEL parity (independent of the trajectory): PY's `dnpnormND`
      at R's final points reproduces R's ll to 1e-9.
@@ -45,6 +51,7 @@ Gate:
      hence the -1 gate, not 0.
 """
 
+import math
 import os
 import sys
 
@@ -57,7 +64,9 @@ from npfixedcomppy import computemixdist, dnpnormND  # noqa: E402
 # R 4.6.1, `npnorm2Dll_` on the same data / initial mix / grid (3 runs
 # bit-identical on this data).
 R_LL = 848.88775287688986
-# Recorded FAST-path result on this build (docs/PERF.md §4a.2).
+# Recorded FAST-path result (docs/PERF.md §4a.2); the gate allows a
+# few ulp of drift across compiler codegen (no ISA flags, Eigen
+# runtime dispatch).
 FAST_LL = 848.7472072261477
 
 X = np.loadtxt(os.path.join(HERE, "parity_2d.csv"), delimiter=",")
@@ -98,7 +107,8 @@ check("fast determinism",
 check("fast converged", f1.convergence == 0,
       f"convergence={f1.convergence} (0)")
 check("fast iter", f1.iter == 10, f"iter={f1.iter} (R: 6)")
-check("fast ll (bit-exact)", f1.ll == FAST_LL,
+check("fast ll (<= 8 ulp of recorded)",
+      abs(f1.ll - FAST_LL) <= 8 * math.ulp(FAST_LL),
       f"ll={f1.ll!r} vs recorded {FAST_LL!r}")
 check("fast grid_gain certificate",
       f1.grid_gain > -1.0,

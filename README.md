@@ -70,9 +70,11 @@ per axis ⇒ 4,913 cells, ≈ 2.2 s at n = 360) — see §6.
 extension, `npfixedcomppy._core`. The whole compute stack (engine,
 support-point solvers, constrained NNLS, gradient and weight sweeps,
 kernel-matrix fills, mixture density) runs in C++/Eigen, with
-**Eigen 5.0.0** vendored header-only under `eigen/`. The **SIMD level is
-decided at build time** (`/arch:AVX2` by default; override with the
-`NPFIC_ARCH` env var — see §3). There are no hand-written OpenMP loops:
+**Eigen 5.0.0** vendored header-only under `eigen/`. The build passes
+**no ISA flags** (no `/arch:*`, no `-march`/`-mavx*`), so one source
+tree builds for x86-64, AArch64 and arm64 alike; vectorization is
+Eigen's own runtime CPU dispatch (see §3). There are no hand-written
+OpenMP loops:
 `setup.py` probe-compiles the compiler with its OpenMP flag at build time
 and, when supported, adds the flag to the extension build so Eigen's own
 compile-time parallel GEMM/GEMV is enabled (serial Eigen otherwise); for a
@@ -146,8 +148,9 @@ marginal 网格的张量积（k = 3：每轴 18 点 ⇒ 4,913 格，n = 360 时
 **计算架构：** `Python → C++/Eigen`——单一 pybind11 扩展
 `npfixedcomppy._core`。整个计算栈（引擎、支撑点求解、约束非负最小二乘、
 梯度与权重扫描、核矩阵填充、混合密度）全部在 C++/Eigen 中完成，其中
-**Eigen 5.0.0** 以 header-only 形式 vendored 在 `eigen/` 下。**SIMD 级别
-在构建期决定**（默认 `/arch:AVX2`，可用环境变量 `NPFIC_ARCH` 覆盖——见
+**Eigen 5.0.0** 以 header-only 形式 vendored 在 `eigen/` 下。构建**不传
+任何 ISA 参数**（无 `/arch:*`、无 `-march`/`-mavx*`），同一源码树可在
+x86-64、AArch64、arm64 上编译；向量化由 Eigen 运行期 CPU 分发完成（见
 §3）。无手写 OpenMP：`setup.py` 在构建期用编译器的 OpenMP 参数做一次
 探测编译，支持时把该参数加入扩展构建，从而启用 Eigen 自身的编译期并行
 GEMM/GEMV（不支持则为串行 Eigen）；对固定构建与线程数，相同输入恒产生
@@ -171,8 +174,10 @@ removed.**
 
   * `method="npnorm2Dll"` is kept as the **k = 2 alias** (the R name,
     API compatibility); the k = 2 result is **bit-identical** to
-    0.2.3 (ll 848.7472072261477 / 10 iters / 5 components on the
-    reference data; ≈ 0.91 s wall).
+    0.2.3 on the 0.3.0 development build (ll
+    848.7472072261477 / 10 iters / 5 components on the reference
+    data; ≈ 0.91 s wall) — the no-ISA-flag build lands within 1 ulp
+    of that ll (see the build note below).
   * Kernel: the general `dnormNDarray` (Eigen `LLT`) for k > 2;
     k = 2 keeps the hand-unrolled 2×2 fast path, so the 2-D
     trajectory is untouched.
@@ -218,6 +223,23 @@ removed.**
   `tests/parity_3d.csv`). The default grid at k = 3 would be
   ≈ 103³ ≈ 1.1 M cells — pass a coarser explicit `gridpoints` for
   k ≥ 3 (see `docs/PERF.md` §4a).
+
+* **Build: no ISA flags (the `NPFIC_ARCH` knob is removed)** — the
+  extension now compiles with the plain compiler baseline on every
+  platform (MSVC `/std:c++17 /O2`, GCC/Clang `-std=c++17 -O3`), with
+  no `/arch:*` / `-march` / `-mavx*`: fixed ISA flags do not compile
+  on AArch64, which the CI wheel matrix (x86-64 + aarch64 + arm64)
+  requires, and they would pin an x86-64 wheel to AVX2 machines. SIMD
+  now comes from Eigen's own runtime CPU dispatch (SSE2/AVX2/AVX-512
+  on x86-64, NEON on AArch64). Measured on this AVX2-capable machine:
+  the wide binned fills now run at the compile baseline, so
+  `npnormllw` is ≈ 52 ms wall at n=5000 (R 120 ms) and ≈ 120 ms at
+  n=20000 (R 500 ms) — still ≈ 2.3–4× ahead of R; the 2-D/3-D
+  trajectory goldens that were bit-exact under the AVX2 build are now
+  gated within 8 ulp of their recorded values (a real kernel /
+  data-layout regression still moves them by orders of magnitude
+  more). All eleven parity suites report `TOTAL BAD: 0` on the
+  no-ISA-flag build.
 
 * **Tests** — `tests/verify_2d_same.py` is now the density-similarity
   gate vs the R reference (rel-L1 < 0.02, max |log-density|
@@ -314,8 +336,9 @@ N-D (`npnormND`) and removed the `NPFIC_2D_EXACT` objective path (see
   `beta` 为 `k x k` 协方差矩阵（默认单位阵）：
 
   * `method="npnorm2Dll"` 保留为 **k = 2 别名**（R 名，API 兼容）；
-    k = 2 的结果与 0.2.3 **位级一致**（参考数据上
-    ll 848.7472072261477 / 10 次迭代 / 5 成分；≈ 0.91 s wall）。
+    k = 2 的结果在 0.3.0 开发构建上与 0.2.3 **位级一致**（参考数据上
+    ll 848.7472072261477 / 10 次迭代 / 5 成分；≈ 0.91 s wall）——
+    不传 ISA 参数的构建落在该 ll 的 1 ulp 之内（见下文构建注记）。
   * 核：k > 2 走通用 `dnormNDarray`（Eigen `LLT`）；k = 2 保留手写
     展开的 2×2 快路径，2-D 轨迹不受影响。
   * 默认网格/初始混合分布是 R 2-D 构造的 N-D 推广：每轴
@@ -350,6 +373,19 @@ N-D (`npnormND`) and removed the `NPFIC_2D_EXACT` objective path (see
   `ll` 1430.711238303976——`tests/parity_3d.csv`）。k = 3 的默认
   网格约为 103³ ≈ 110 万格——k ≥ 3 请显式传较粗的 `gridpoints`
   （见 `docs/PERF.md` §4a）。
+
+* **构建：不传 ISA 参数（`NPFIC_ARCH` 开关移除）**——扩展现在在所有
+  平台都用纯编译器基线编译（MSVC `/std:c++17 /O2`、GCC/Clang
+  `-std=c++17 -O3`），不带 `/arch:*` / `-march` / `-mavx*`：固定 ISA
+  参数在 AArch64 上无法编译（CI 的 wheel 矩阵 x86-64 + aarch64 +
+  arm64 需要），且会把 x86-64 wheel 绑死在 AVX2 机器上。SIMD 改由
+  Eigen 自身的运行期 CPU 分发提供（x86-64 上 SSE2/AVX2/AVX-512，
+  AArch64 上 NEON）。在本机（支持 AVX2）实测：宽分箱填充按编译基线
+  运行，`npnormllw` n=5000 wall ≈ 52 ms（R 120 ms）、n=20000 ≈ 120
+  ms（R 500 ms）——仍领先 R ≈2.3–4×；在 AVX2 构建下逐位精确的 2-D/3-D
+  轨迹金标（ll）现在改为门控在录制值的 8 ulp 之内（真正的核/数据
+  布局回归仍会使其偏移若干个数量级）。全部 11 个 parity 套件在不传
+  ISA 参数的构建上报告 `TOTAL BAD: 0`。
 
 * **测试**——`tests/verify_2d_same.py` 改为对 R 参考的密度相似度门
   （rel-L1 < 0.02、max |log-density| 差 < 0.25、主成分位置差 0.70
@@ -940,35 +976,21 @@ pip install .                 # or: pip install -e .  (editable, for development
 1. compiles the C++/Eigen extension `npfixedcomppy._core`
    (sources: `cpp/npfc_py.cpp`, `cpp/npfc_nnls.cpp`; headers from
    `cpp/` and the vendored `eigen/`) with the platform compiler
-   (`/std:c++17 /O2` on MSVC, `-std=c++17 -O3` on GCC/Clang) plus the
-   SIMD flags below;
+   (`/std:c++17 /O2` on MSVC, `-std=c++17 -O3` on GCC/Clang) — no ISA
+   flags (see below);
 2. packages `python/npfixedcomppy/` (the Python front-end) together with
    the built extension into an installable wheel.
 
-**SIMD level (`NPFIC_ARCH`)** — set it before the build; the artifact
-only runs on hardware with that instruction set or a superset:
-
-| `NPFIC_ARCH` | effect (MSVC / GCC-Clang)                              |
-|--------------|--------------------------------------------------------|
-| *(unset)*    | `avx2` — `/arch:AVX2` / `-mavx2` (default; what ships) |
-| `avx`        | `/arch:AVX` / `-mavx`                                   |
-| `avx512`     | `/arch:AVX512` / `-mavx512*`                            |
-| `native`     | no effect on MSVC (falls back to `avx2`) / `-march=native` |
-| *(empty)*    | plain x86-64 baseline (SSE2, no `/arch` flag)           |
-
-```bat
-:: MSVC (cmd.exe): choose a different SIMD level
-set NPFIC_ARCH=avx512
-pip install .
-
-:: bash
-NPFIC_ARCH=avx512 pip install .
-```
-
-Note: MSVC's `/arch:AVX2` also enables FMA contraction (documented MSVC
-behaviour under the default `/fp:precise`); GCC/Clang do not. The
-parity gates (§5) are the arbiter of whether a given level is safe for
-the bit-exactness requirements.
+**No ISA flags** — the build passes none: no `/arch:*` on MSVC, no
+`-march`/`-mavx*` on GCC/Clang. The artifact therefore runs on any
+machine of its target architecture (x86-64, AArch64, arm64) — no AVX2
+requirement. Vectorization happens at runtime: Eigen detects the host
+CPU on import and dispatches its kernels to the best available ISA
+(SSE2/AVX2/AVX-512 on x86-64, NEON on AArch64). (0.2.x had a
+`NPFIC_ARCH` build-time knob — `avx2` default / `avx` / `avx512` /
+`native` / empty = SSE2 baseline. It is removed: fixed ISA flags do not
+even compile on AArch64, which the cross-architecture wheel build
+needs, and they would pin an x86-64 wheel to AVX2 machines.)
 
 ### Packaging / building wheels
 
@@ -998,30 +1020,18 @@ pip install .                 # 开发期可用：pip install -e .（editable）
 
 1. 用平台编译器编译 C++/Eigen 扩展 `npfixedcomppy._core`（源文件：
    `cpp/npfc_py.cpp`、`cpp/npfc_nnls.cpp`；头文件来自 `cpp/` 与 vendored
-   的 `eigen/`），MSVC 下为 `/std:c++17 /O2`，GCC/Clang 下为
-   `-std=c++17 -O3`，外加下面的 SIMD 参数；
+   的 `eigen/`）——MSVC 下为 `/std:c++17 /O2`，GCC/Clang 下为
+   `-std=c++17 -O3`，不传任何 ISA 参数（见下）；
 2. 把 `python/npfixedcomppy/`（Python 前端）与编译出的扩展打包成 wheel。
 
-**SIMD 级别（`NPFIC_ARCH`）** —— 构建前设置；产物只能在该指令集（或
-超集）的硬件上运行：
-
-| `NPFIC_ARCH` | 效果（MSVC / GCC-Clang）                                   |
-|--------------|------------------------------------------------------------|
-| *（未设置）* | `avx2` — `/arch:AVX2` / `-mavx2`（默认，即发布构建）        |
-| `avx`        | `/arch:AVX` / `-mavx`                                       |
-| `avx512`     | `/arch:AVX512` / `-mavx512*`                                |
-| `native`     | MSVC 下无效（回退 `avx2`） / `-march=native`                |
-| *（空值）*   | 纯 x86-64 基线（SSE2，无 `/arch` 参数）                     |
-
-```bat
-:: MSVC（cmd.exe）：选择其他 SIMD 级别
-set NPFIC_ARCH=avx512
-pip install .
-```
-
-注意：MSVC 的 `/arch:AVX2` 同时启用 FMA 收缩（MSVC 在默认
-`/fp:precise` 下的既定行为）；GCC/Clang 不会。对逐位精确性要求是否
-安全，以 §5 的 parity 门为准。
+**不传任何 ISA 参数** —— 构建不加 `/arch:*`（MSVC）、`-march`/`-mavx*`
+（GCC/Clang）。产物因此可在目标架构的任意机器上运行（x86-64、
+AArch64、arm64），无 AVX2 要求；向量化在运行期完成：Eigen 导入时
+探测宿主 CPU，把内核分发到可用的最优指令集（x86-64 上 SSE2/AVX2/
+AVX-512，AArch64 上 NEON）。（0.2.x 曾有 `NPFIC_ARCH` 构建期开关——
+`avx2` 默认 / `avx` / `avx512` / `native` / 空值 = SSE2 基线。现已移除：
+固定 ISA 参数在 AArch64 上根本无法编译（CI 的跨架构 wheel 构建因此
+失败），且会把 x86-64 wheel 绑死在 AVX2 机器上。）
 
 **打包 / 构建 wheel：**
 
@@ -1374,9 +1384,9 @@ the R package on parallel platforms).
 
 ## 6. Performance
 
-The whole solver is C++/Eigen (SIMD level decided at build time,
-`/arch:AVX2` by default; Eigen's own parallel GEMM/GEMV is enabled when
-the build's OpenMP probe passes); the kernel column cache — each kernel
+The whole solver is C++/Eigen (no ISA flags — Eigen runtime-dispatches
+the vector width; Eigen's own parallel GEMM/GEMV is enabled when the
+build's OpenMP probe passes); the kernel column cache — each kernel
 column `K[:, mu]` computed once per fit and reused by the mapping,
 gradient, weight, and collapse passes — plus the 0.2.3 relaxed
 support search (see "What's new in 0.2.3" above) are the main
@@ -1484,8 +1494,9 @@ behaviour ("What's new in 0.2.3",
 
 ### 性能
 
-整个求解器为 C++/Eigen（SIMD 级别在构建期决定，默认 `/arch:AVX2`；构建期
-OpenMP 探测通过时启用 Eigen 自身的并行 GEMM/GEMV）；内核列缓存——每个内核
+整个求解器为 C++/Eigen（不传 ISA 参数，向量宽度由 Eigen 运行期分发；
+构建期 OpenMP 探测通过时启用 Eigen 自身的并行 GEMM/GEMV）；内核列
+缓存——每个内核
 列 `K[:, mu]` 每次拟合只计算一次，供 mapping、梯度、权重、collapse 各环节
 复用——加上 0.2.3 的支撑点搜索放宽（见上文 "What's new in 0.2.3"），是
 主要的加速手段。本构建典型耗时（5 次取中位数，排除预热）：

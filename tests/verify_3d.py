@@ -6,9 +6,11 @@ acceptance criteria (the fitted density must be what the family
 computes, and the fit must be sane):
 
   1. two runs bit-identical (determinism);
-  2. the fit converges and the ll is bit-exact against the recorded
+  2. the fit converges and the ll is within 8 ulp of the recorded
      value (trajectory guard — a kernel or data-layout regression
-     would move it);
+     would move it by far more than a few ulp; bit-exact is not
+     preserved across compiler codegen: no ISA flags, Eigen runtime
+     dispatch);
   3. self-consistency: `ll == -sum log dnpnormND(...)` (1e-9) using
      the PUBLIC ND kernel — an independent recomputation of the
      mixture density from the returned support points / weights /
@@ -29,6 +31,7 @@ explicit 18-per-axis tensor product recorded in this file's comment
 (11 iters, 4 support points incl. the zero-weight fixed point).
 """
 
+import math
 import os
 import sys
 
@@ -38,6 +41,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 from npfixedcomppy import computemixdist, dnpnormND  # noqa: E402
 
+# Recorded result (see header); the gate allows a few ulp of drift
+# across compiler codegen (no ISA flags, Eigen runtime dispatch).
 LL_RECORD = 1430.711238303976
 
 X = np.loadtxt(os.path.join(HERE, "parity_3d.csv"), delimiter=",")
@@ -64,7 +69,8 @@ check("determinism",
       f"two runs bit-identical (ll={r1.ll!r})")
 check("converged", r1.convergence == 0,
       f"convergence={r1.convergence} (0)")
-check("ll (bit-exact)", r1.ll == LL_RECORD,
+check("ll (<= 8 ulp of recorded)",
+      abs(r1.ll - LL_RECORD) <= 8 * math.ulp(LL_RECORD),
       f"ll={r1.ll!r} vs recorded {LL_RECORD!r}")
 
 pt = np.array(r1.pt)

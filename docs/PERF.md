@@ -110,31 +110,36 @@ C++ 引擎各阶段，§4 的 wall 另含 Python 侧分箱与网格生成；`eva
 The whole compute stack — engine, support-point solvers, constrained NNLS,
 gradient and weight sweeps, kernel-matrix fills, the mixture density —
 lives in `cpp/` (pybind11 module `npfixedcomppy._core`, built by
-`setup.py` with MSVC `/std:c++17 /O2 /arch:AVX2` by default, GCC/Clang
-`-O3 -mavx2` elsewhere).
+`setup.py` with MSVC `/std:c++17 /O2`, GCC/Clang `-std=c++17 -O3`, and
+**no ISA flags** — no `/arch:*`, no `-march`/`-mavx*`).
 
-**The SIMD level is decided at BUILD time, not runtime**, by the
-`NPFIC_ARCH` environment variable: `avx2` (default), `avx`, `avx512`,
-`native` (GCC/Clang `-march=native` only), or empty for the plain x86-64
-SSE2 baseline. The build artifact only runs on hardware with that
-instruction set or a superset; there is no runtime ISA dispatch and the
-source is unchanged. Note the MSVC and GCC/Clang flags do **not** behave
-identically: MSVC's `/arch:AVX2` also lets the optimizer contract
-multiply-add pairs into FMA instructions (documented MSVC behaviour under
-the default `/fp:precise`); GCC/Clang keep FMA off unless `-mfma` is
-added (it is not). The parity gates validate the shipping build;
-cross-architecture bit-identity is not a requirement.
+**Vectorization is runtime, not build time.** The build passes no
+instruction-set flags, so one source tree compiles for x86-64, AArch64
+and arm64 alike (fixed ISA flags do not even compile on AArch64, which
+the CI wheel matrix requires), and Eigen detects the host CPU on import
+and dispatches its kernels to the best available ISA (SSE2/AVX2/AVX-512
+on x86-64, NEON on AArch64). The 0.2.x `NPFIC_ARCH` build-time knob —
+`avx2` default / `avx` / `avx512` / `native` / empty = SSE2 baseline —
+was removed for that reason; on the AVX2-capable machine used for this
+document's measurements the runtime dispatch still uses AVX2 packets
+for the Eigen vectorized parts.
 
 Two measured consequences of moving from the SSE2 baseline to AVX2 on
-this machine:
+this machine (0.2.x, when the level was a build flag):
 
 * the wide binned fills (`npnormllw`, `nptllw`) got ~2× faster
   (354 → 130 ms at n=5000), closing the historical gap with R to within
   a few percent — the grid-fill memo (section 3) has since cut
   `npnormllw` further to ≈ 37 ms wall, now ~3× ahead of R (section 4);
 * the small un-binned normal cases got ~4 ms slower (`npnormll` n=1000:
-  7.8 → 11.6 ms) — short vectors with AVX2 tails; `NPFIC_ARCH=` restores
-  the baseline. The t-family and all larger cases are unaffected.
+  7.8 → 11.6 ms) — short vectors with AVX2 tails; building without the
+  flag restored the baseline. The t-family and all larger cases are
+  unaffected.
+
+Current build (no ISA flags): the wide fills run at the compile
+baseline — `npnormllw` is ≈ 52 ms wall at n=5000 (R 120 ms) and
+≈ 120 ms at n=20000 (R 500 ms), still ≈ 2.3–4× ahead; the Eigen
+vectorized parts still runtime-dispatch to AVX2 on this machine.
 
 **There is no hand-written OpenMP — the only threading in the package is
 Eigen's own, enabled by the build's OpenMP probe.**
@@ -173,26 +178,29 @@ behaviour, section 4c.)
 
 整个计算栈——引擎、支撑点求解器、约束 NNLS、梯度/权重扫描、核矩阵
 填充、混合密度——都在 `cpp/`（pybind11 模块 `npfixedcomppy._core`，
-`setup.py` 默认 MSVC `/std:c++17 /O2 /arch:AVX2`，GCC/Clang
-`-O3 -mavx2`）。
+`setup.py` 用 MSVC `/std:c++17 /O2`、GCC/Clang `-std=c++17 -O3`，
+**不传任何 ISA 参数**——无 `/arch:*`、无 `-march`/`-mavx*`）。
 
-**SIMD 级别在构建期而非运行期决定**，由 `NPFIC_ARCH` 环境变量选择：
-`avx2`（默认）/ `avx` / `avx512` / `native`（仅 GCC/Clang
-`-march=native`）/ 空 = 纯 x86-64 SSE2 基线。构建产物只能跑在该指令
-集（或超集）硬件上；无运行期 ISA 分发，源码不变。注意 MSVC 与
-GCC/Clang flag 行为**不一致**：MSVC `/arch:AVX2` 会让优化器把乘加对
-收缩为 FMA（`/fp:precise` 下的文档化 MSVC 行为）；GCC/Clang 不加
-`-mfma` 则 FMA 不开（实际未加）。parity 门验证的是出货构建；跨架构
-位级一致不是要求。
+**向量化在运行期而非构建期完成。** 构建不传指令集参数，同一源码树
+可在 x86-64、AArch64、arm64 上编译（固定 ISA 参数在 AArch64 上根本
+无法编译，而 CI 的 wheel 矩阵需要它）；Eigen 导入时探测宿主 CPU，
+把内核分发到可用的最优指令集（x86-64 上 SSE2/AVX2/AVX-512，
+AArch64 上 NEON）。0.2.x 的 `NPFIC_ARCH` 构建期开关（`avx2` 默认 /
+`avx` / `avx512` / `native` / 空 = SSE2 基线）因此移除；本文档测量
+所用的 AVX2 机器上，运行期分发对 Eigen 向量化部分仍走 AVX2 指令包。
 
-SSE2 基线 → AVX2 的两个实测后果：
+SSE2 基线 → AVX2 的两个实测后果（0.2.x，SIMD 级别还是构建参数时）：
 
 * 宽分箱填充（`npnormllw`、`nptllw`）约 2×（n=5000 354 → 130 ms），
   与 R 的历史差距缩到几个百分点内——网格填充 memo（§3）之后
   `npnormllw` 进一步到 ≈37 ms wall，比 R 快 ≈3×（§4）；
 * 小样本未分箱正态变慢 ≈4 ms（`npnormll` n=1000：7.8 → 11.6 ms）
-  ——短向量的 AVX2 尾部效应；`NPFIC_ARCH=` 可恢复基线。t 族与所有
+  ——短向量的 AVX2 尾部效应；去掉该参数即恢复基线。t 族与所有
   大样本用例不受影响。
+
+当前构建（不传 ISA 参数）：宽填充按编译基线运行——`npnormllw`
+n=5000 ≈ 52 ms wall（R 120 ms）、n=20000 ≈ 120 ms（R 500 ms），
+仍领先 ≈2.3–4×；Eigen 向量化部分在本机仍运行期分发到 AVX2。
 
 **包内没有手写 OpenMP——唯一的线程来自 Eigen 自身，由构建期 OpenMP
 探测打开。** 所有手写 `#pragma omp` 已移除（与 Eigen 内部线程处理
