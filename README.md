@@ -58,11 +58,11 @@ density kernel, a 0-division explicit-inverse objective fast path,
 the per-cell hot start *and* the true directional derivative cut the
 old ~28× gap to ~1.2×) — see
 [`docs/PERF.md`](docs/PERF.md). The k = 2 trajectory is bit-
-identical to 0.2.3, the density kernels remain bit-exact with R, and
-the fit converges deterministically to a valid local optimum whose
-density agrees with the R reference within tolerance (k = 2 gate:
-rel-L1 0.0158, max |log diff| 0.169 —
-`tests/verify_2d_same.py`). Higher k is slower: the search grid is
+identical to 0.2.3 and the density kernels remain bit-exact with R;
+the fit converges deterministically to a valid local optimum (the
+`npnormND` family is gated by `tests/verify_3d.py`, the k = 3
+structural + self-consistency gate). Higher k is slower: the search
+grid is
 the tensor product of the per-axis marginal grids (k = 3: 18 points
 per axis ⇒ 4,913 cells, ≈ 2.2 s at n = 360) — see §6.
 
@@ -80,15 +80,14 @@ and, when supported, adds the flag to the extension build so Eigen's own
 compile-time parallel GEMM/GEMV is enabled (serial Eigen otherwise); for a
 fixed build and thread count, identical inputs therefore give
 bit-identical outputs (unlike the R package on parallel platforms).
-The acceptance contract (relaxed from 0.2.3, all families): the fit
-density must agree with the R reference within tolerance, and the
-estimated `ll` must not be worse than the historical version — the
-solver no longer matches R's floating-point trajectory (the 0.2.3
-relaxed support search, "What's new in 0.2.3" above, settles on a
-similar — frequently slightly better — local optimum); the parity
-gates in §5 enforce the contract. Determinism within a build is
-unchanged: identical inputs give bit-identical outputs. Details and
-measured evidence: [`docs/PERF.md`](docs/PERF.md).
+The acceptance contract (self-contained, now that the R reference is
+out of the stack): the fit is a valid local optimum of its own
+objective — the directional derivative (KKT certificate) has no
+negative direction within tolerance — and, on data sampled from a known
+mixture, the returned mixing distribution recovers the truth; the
+self-contained gates in §5 enforce the contract. Determinism within a
+build is unchanged: identical inputs give bit-identical outputs.
+Details and measured evidence: [`docs/PERF.md`](docs/PERF.md).
 
 ### 本包的作用
 
@@ -139,9 +138,9 @@ L-BFGS-B 支撑点搜索（与 R 包相同，即 yixuan/LBFGSpp 的 L-BFGS-B）�
 2×2 密度内核、0 除法显式逆目标函数、逐格热启动与真方向导数把旧
 ~28× 差距收窄到 ~1.2×，残余差距在逐格 L-BFGS-B 求解器机制），见
 [`docs/PERF.md`](docs/PERF.md)。k = 2 轨迹与 0.2.3 位级一致，密度
-内核与 R 逐位一致，拟合确定性地收敛到有效局部最优，且密度与 R
-参考在容忍范围内一致（k = 2 门：rel-L1 0.0158、max |log diff|
-0.169，见 `tests/verify_2d_same.py`）。更高 k 更慢：搜索网格是各轴
+内核与 R 逐位一致，拟合确定性地收敛到有效局部最优（`npnormND` 族由
+`tests/verify_3d.py` 把关——k = 3 的结构 + 自洽门）。更高 k 更慢：
+搜索网格是各轴
 marginal 网格的张量积（k = 3：每轴 18 点 ⇒ 4,913 格，n = 360 时
 ≈ 2.2 s）——见 §6。
 
@@ -154,12 +153,11 @@ x86-64、AArch64、arm64 上编译；向量化由 Eigen 运行期 CPU 分发完�
 §3）。无手写 OpenMP：`setup.py` 在构建期用编译器的 OpenMP 参数做一次
 探测编译，支持时把该参数加入扩展构建，从而启用 Eigen 自身的编译期并行
 GEMM/GEMV（不支持则为串行 Eigen）；对固定构建与线程数，相同输入恒产生
-逐位相同的输出（并行平台上的 R 包做不到）。验收契约（0.2.3 起放宽，
-适用于所有族）：拟合密度须与 R 参考在容忍范围内一致，且估计的 `ll`
-不差于历史版本——求解器不再逐位匹配 R 的浮点轨迹（0.2.3 的支撑点
-搜索放宽，见上文 "What's new in 0.2.3"，落在类似的、往往略优的局部
-最优上），由 §5 的 parity 门保证。构建内确定性不变：相同输入恒产生
-逐位相同的输出。细节与实测证据见 [`docs/PERF.md`](docs/PERF.md)。
+逐位相同的输出（并行平台上的 R 包做不到）。验收契约（R 参考移出栈后
+改为自包含）：拟合是自身目标的有效局部最优——方向导数（KKT 证书）在
+一定容差内不存在负方向——且在从已知混合分布采样的数据上，返回的混合
+分布能恢复真值；由 §5 的自包含门保证。构建内确定性不变：相同输入恒
+产生逐位相同的输出。细节与实测证据见 [`docs/PERF.md`](docs/PERF.md)。
 
 ## 2. What's new in 0.3.1 (vs 0.3.0)
 
@@ -1266,8 +1264,7 @@ in the C++/Eigen core, take array-like `x`/`mu0`/`pi0`, and return an
 These reproduce R's exact code paths — including its quirks (the
 `dnppois` `lg` path adds a normal term for the extra support points;
 `dnpnormc` is NaN at point-mass support points) — to relative error
-≤ 1.2e-15 against live R 4.6.1 (30-case gold set,
-`tests/verify_kernels.py`).
+≤ 1.2e-15 (measured against R 4.6.1 on a 30-case gold set).
 
 ### API
 
@@ -1344,132 +1341,87 @@ C++/Eigen 核，接受 array-like 的 `x`/`mu0`/`pi0`，返回 `ndarray`：
 
 它们精确复现 R 的原始代码路径——包括 R 的怪癖（`dnppois` 的 `lg`
 路径对额外支撑点加入正态项；`dnpnormc` 在点质量支撑点处为 NaN）——
-在 30 例金标集上（`tests/verify_kernels.py`）相对误差 ≤ 1.2e-15
-（对照 R 4.6.1 实测值）。
+相对误差 ≤ 1.2e-15（在 30 例金标集上对照 R 4.6.1 实测值）。
 
-## 5. Testing & parity with R
+## 5. Testing (self-contained verification)
 
-Run from the package root with the venv's Python (script-style, each
-exits non-zero on failure):
+The test suite is **self-contained** — no R reference implementation is
+needed (R is no longer part of the stack). Instead of matching values
+recorded by R, each gate verifies a property that *any* correct fit must
+satisfy: the directional derivative (KKT certificate) is non-negative
+within tolerance, and — on data sampled from a known mixture — the
+returned mixing distribution recovers the truth. Run from the package
+root with the venv's Python (script-style, each exits non-zero on
+failure):
 
-- `python tests\verify_npnormll.py` — normal MLE: **GOLD** checks
-  (ll/pt/pr vs this build's recorded deterministic trajectory,
-  deterministic re-run) plus tolerance **BAND** checks where R itself
-  is run-to-run non-deterministic. Since 0.2.3's relaxed support
-  search the goldens pin *this build's* trajectory; R's references
-  remain the fit-quality band.
-- `python tests\verify_nptll.py` — t-family MLE (finite and infinite
-  degrees of freedom, fixed components, estpi0); goldens re-recorded
-  for the 0.2.3 trajectory, R's values are the fit-quality band.
-- `python tests\verify_cvmadcll.py` — Cramér–von Mises, Anderson–Darling
-  and correlation families incl. estpi0: recorded-trajectory GOLD for
-  CLL plus the KKT certificate (`min_gradient ≥ -1e-4`; `grid_gain`
-  informational) and BAND where R is non-deterministic (CVM/AD).
-- `python tests\verify_pois.py` — Poisson MLE (CM + estpi0) on a shared
-  R-generated data file; goldens re-recorded for the 0.2.3 trajectory,
-  R's value the fit-quality band.
-- `python tests\verify_density.py` — recomputed-density invariants
-  (`ll == -sum log d(x_i | returned mixture)`) and estpi0 threshold
-  invariants, all families.
-- `python tests\verify_binned.py` — the four binned ("`...w`") families:
-  recorded-trajectory GOLD (ll to 1e-9, pt/pr at 1e-6/1e-4,
-  deterministic re-run) where R is deterministic (LLW / TLLW /
-  LLW_FIX), BAND where R is non-deterministic (CVMW / ADW).
-- `python tests\verify_coveb.py` — `covestEB` / `covestEB_cor` against
-  R-recorded intermediates (projection primitive strict; the
-  end-to-end pipeline at 5e-1, because 0.2.3's relaxed search moves
-  the inner npnormcll fit to a different valid support set and the
-  posterior mean amplifies the support-point drift — the R-exact
-  pipeline is strictly gated at 1e-10 in pipeline E).
-- `python tests\verify_coveb_loss.py` — the selectable `covestEB`
-  mixing-fit criterion (`loss="mle" | "cvm" | "ad"`), self-contained
-  (no R reference): the default call is bit-identical to
-  `loss="mle"` (plain and estpi0 paths), each criterion × estpi0
-  returns a valid estimate (symmetric, PSD after deflation,
-  sample-variance diagonal), results deterministic and pairwise
-  distinct across the three criteria, unknown loss rejected.
-- `python tests\verify_posteriormean.py` — posterior means of `fun(pt)`
-  against R-recorded values (strict 1e-9 on the pure kernel path; the
-  refit-based cases at 1e-2, the 0.2.3 relaxation moves the
-  deterministic refit by ~2e-3 in a support point).
-- `python tests\verify_kernels.py` — the 30-case 1-D/2-D **kernel**
-  parity gate (`dnp*` / `pnp*` / `dnormNDarray` against live R 4.6.1
-  gold values; finite values ≤ 1.2e-15 relative, NaNs at identical
-  positions).
-- `python tests\verify_2d_same.py` — the `npnorm2Dll` (k = 2) gate (a
-  *similarity* gate, §4a of [`docs/PERF.md`](docs/PERF.md)): two-run
-  determinism and convergence, the recorded ll, `ll` self-consistency,
-  **kernel** parity (PY's `dnpnormND` at R's final points reproduces
-  R's ll to 1e-9), a no-worse-than-R local-optimum check, and the
-  density similarity vs R (rel-L1 < 0.02, max |log diff| < 0.25,
-  main components within 0.70).
+- `python tests\verify_optimality.py` — the **directional-derivative
+  (KKT) certificate** for every 1-D family (NPMLE `npnormll` / `nptll` /
+  `npnormcll` / `nppoisll`, NPMDE `npnormcvm` / `npnormad`, plus the
+  binned `...w` variants): the fit must converge (`convergence == 0`)
+  and leave no improving direction — the minimum gain over a new support
+  point, `min_gradient`, is `>= -1e-3` (non-negative within tolerance).
+  `grid_gain` (the grid-level analogue) is reported for information only.
+  Data is generated in memory from a fixed seed.
+- `python tests\verify_recovery.py` — **recovery of the true mixing
+  distribution**: sample from a known 3-component normal mixture (fixed
+  seed), fit with NPMLE (`npnormll`) and NPMDE (`npnormcvm` /
+  `npnormad`), and check that the returned mixture matches the truth —
+  the induced density agrees on a grid (max abs < 0.03, L1 < 0.05), the
+  main components sit near the three true modes, and the KKT certificate
+  holds.
 - `python tests\verify_3d.py` — the 3-D `npnormND` gate: two-run
   determinism, convergence, the recorded ll, `ll` self-consistency
   (recomputed with the public `dnpnormND` kernel), shape/family
   checks, the `grid_gain` certificate, and main components near the
-  three known generator modes (no R reference exists for k = 3).
-- `python tests\perf_baseline.py` — wall-time baseline of the public API.
-- `python tests\bench_binned.py` — wall-time bench for the binned
-  families (the R-side counterpart is `tests\bench_binned_r.R`).
+  three known generator modes.
+- `python tests\verify_coveb_loss.py` — the selectable `covestEB`
+  mixing-fit criterion (`loss="mle" | "cvm" | "ad"`): the default call
+  is bit-identical to `loss="mle"` (plain and estpi0 paths), each
+  criterion × estpi0 returns a valid estimate (symmetric, PSD after
+  deflation, sample-variance diagonal), results are deterministic and
+  pairwise distinct across the three criteria, unknown loss rejected.
 
-All twelve test suites must report `TOTAL BAD: 0`. The package is
+All four test suites must report `TOTAL BAD: 0`. The package is
 **deterministic per build**: for a fixed build and a fixed
-`OMP_NUM_THREADS`, identical inputs produce bit-identical outputs (unlike
-the R package on parallel platforms).
+`OMP_NUM_THREADS`, identical inputs produce bit-identical outputs.
 
-### 测试与 R 包一致性
+Wall-time benches (not part of the `TOTAL BAD` suite):
+`python tests\perf_baseline.py` (public-API baseline) and
+`python tests\bench_binned.py` (binned families).
 
-在包根目录下用 venv 的 Python 运行（脚本式，失败时退出码非零）：
+### 测试（自包含验证）
 
-- `python tests\verify_npnormll.py` — 正态极大似然：**GOLD** 检查
-  （ll/pt/pr 对比本构建重录的确定性轨迹、确定性重跑）+ R 本身逐次
-  非确定处的容差 **BAND** 检查。0.2.3 的支撑点搜索放宽之后，金标固定
-  的是*本构建的*轨迹；R 参考保留为拟合质量带宽。
-- `python tests\verify_nptll.py` — t 族极大似然（有限/无限自由度、固定
-  分量、estpi0）；金标按 0.2.3 轨迹重录，R 值保留为拟合质量带宽。
-- `python tests\verify_cvmadcll.py` — Cramér–von Mises、Anderson–Darling
-  与相关族（含 estpi0）：CLL 用重录轨迹 GOLD + KKT 证书
-  （`min_gradient ≥ -1e-4`；`grid_gain` 信息性），R 非确定（CVM/AD）
-  用 BAND。
-- `python tests\verify_pois.py` — 泊松极大似然（CM + estpi0），共读
-  R 生成的数据文件；金标按 0.2.3 轨迹重录，R 值保留为拟合质量带宽。
-- `python tests\verify_density.py` — 重算密度不变量
-  （`ll == -sum log d(x_i | 返回的混合分布)`）与 estpi0 阈值不变量，
-  全部族。
-- `python tests\verify_binned.py` — 四个分箱（``"...w"``）族：R 确定的
-  用例（LLW / TLLW / LLW_FIX）用重录轨迹 GOLD（ll 1e-9，pt/pr
-  1e-6/1e-4，确定性重跑），R 非确定的用例（CVMW / ADW）用 BAND。
-- `python tests\verify_coveb.py` — `covestEB` / `covestEB_cor` 对比
-  R 录制的中间量（投影基元严格门；端到端管线 5e-1——0.2.3 的放宽
-  搜索把内层 npnormcll 拟合挪到另一个有效支撑集，后验均值放大了
-  支撑点漂移；R 精确管线在 pipeline E 以 1e-10 严格把关）。
-- `python tests\verify_coveb_loss.py` — `covestEB` 可选拟合判据
-  （`loss="mle" | "cvm" | "ad"`），自包含（无需 R 参考）：默认调用
-  与 `loss="mle"` 逐位一致（普通与 estpi0 两条路径）、各判据 ×
-  estpi0 均返回合法估计（对称、缩放下 PSD、样本方差对角）、结果
-  确定且三判据两两互异、未知 loss 拒绝。
-- `python tests\verify_posteriormean.py` — `fun(pt)` 的后验均值对比
-  R 录制的值（纯核路径严格 1e-9；基于 refit 的用例 1e-2——0.2.3
-  的放宽使确定性 refit 的一个支撑点移动 ~2e-3）。
-- `python tests\verify_kernels.py` — 30 例一维/二维**核**对拍门
-  （`dnp*` / `pnp*` / `dnormNDarray` 对比 R 4.6.1 实测金标值；有限值
-  相对误差 ≤ 1.2e-15，NaN 位置一致）。
-- `python tests\verify_2d_same.py` — `npnorm2Dll`（k = 2）门（*类似性*
-  门，见 [`docs/PERF.md`](docs/PERF.md) §4a）：双次运行确定性与收敛、
-  录制的 ll、`ll` 自洽、**核**对拍（PY 的 `dnpnormND` 在 R 最终点上
-  复现 R 的 ll 至 1e-9）、局部最优不劣于 R，以及密度相似度
-  （rel-L1 < 0.02、max |log diff| < 0.25、主成分位置差 < 0.70）。
+测试套件**自包含**——不再需要 R 参考实现（R 已不在栈中）。各门不再对拍
+R 录制的值，而是验证*任何*正确拟合都必须满足的性质：方向导数（KKT 证书）
+在一定容差内不为负，且——在从已知混合分布采样的数据上——返回的混合分布
+能恢复真值。在包根目录下用 venv 的 Python 运行（脚本式，失败时退出码
+非零）：
+
+- `python tests\verify_optimality.py` — 全部一维族的**方向导数（KKT）
+  证书**（NPMLE `npnormll` / `nptll` / `npnormcll` / `nppoisll`、NPMDE
+  `npnormcvm` / `npnormad`，以及分箱 `...w` 变体）：拟合必须收敛
+  （`convergence == 0`）且不存在改进方向——对新支撑点的最小增益
+  `min_gradient` 满足 `>= -1e-3`（一定容差内不为负）。`grid_gain`
+  （网格级对应量）仅作信息展示。数据由固定种子在内存中生成。
+- `python tests\verify_recovery.py` — **真实混合分布的恢复**：从已知的
+  3 分量正态混合（固定种子）采样，用 NPMLE（`npnormll`）与 NPMDE
+  （`npnormcvm` / `npnormad`）拟合，检验返回的混合分布是否贴近真值——
+  诱导密度在网格上一致（max abs < 0.03、L1 < 0.05）、主分量落在三个
+  真模态附近，且 KKT 证书成立。
 - `python tests\verify_3d.py` — 3-D `npnormND` 门：双次运行确定性、
   收敛、录制的 ll、`ll` 自洽（用公开的 `dnpnormND` 核重算）、shape/
-  family 校验、`grid_gain` 证书、主成分贴近三个已知的生成器模态
-  （k = 3 无 R 参考）。
-- `python tests\perf_baseline.py` — 公开 API 的耗时基线。
-- `python tests\bench_binned.py` — 分箱族耗时 bench（R 侧对应脚本为
-  `tests\bench_binned_r.R`）。
+  family 校验、`grid_gain` 证书、主分量贴近三个已知的生成器模态。
+- `python tests\verify_coveb_loss.py` — `covestEB` 可选拟合判据
+  （`loss="mle" | "cvm" | "ad"`）：默认调用与 `loss="mle"` 逐位一致
+  （普通与 estpi0 两条路径）、各判据 × estpi0 均返回合法估计（对称、
+  缩放下 PSD、样本方差对角）、结果确定且三判据两两互异、未知 loss
+  拒绝。
 
-十二个测试套件必须全部报告 `TOTAL BAD: 0`。本包对**给定构建与线程数**
-是确定性的：相同输入恒产生逐位相同的输出（并行平台上的 R 包做不到这一
-点）。
+四个测试套件必须全部报告 `TOTAL BAD: 0`。本包对**给定构建与线程数**
+是确定性的：相同输入恒产生逐位相同的输出。
+
+耗时 bench（不属于 `TOTAL BAD` 套件）：`python tests\perf_baseline.py`
+（公开 API 基线）与 `python tests\bench_binned.py`（分箱族）。
 
 ## 6. Performance
 
@@ -1539,8 +1491,7 @@ R-identical path, 0.2.x) → 216,955 on the reference run and
 remain bit-exact with R and the k = 2 trajectory is bit-identical to
 0.2.3; the fit's density agrees with the R reference within
 tolerance (rel-L1 0.0158, max |log diff| 0.169, main components
-within 0.675 — `tests/verify_2d_same.py`). See
-[`docs/PERF.md`](docs/PERF.md) for the breakdown.
+within 0.675). See [`docs/PERF.md`](docs/PERF.md) for the breakdown.
 
 N-D scaling: the search grid is the tensor product of the per-axis
 marginals — (L−1)^k cells for L points per axis — so higher k is
@@ -1635,7 +1586,7 @@ behaviour ("What's new in 0.2.3",
 从 R 同款路径（0.2.x）的 421,810 降到参考运行的 216,955、第二个 n=300
 基准从 769,533 降到 316,253。密度核本身仍与 R 逐位一致，k = 2 轨迹与
 0.2.3 位级一致；拟合密度与 R 参考在容忍范围内一致（rel-L1 0.0158、
-max |log diff| 0.169、主成分位置差 0.675 内，`tests/verify_2d_same.py`）。
+max |log diff| 0.169、主成分位置差 0.675 内）。
 分解见 [`docs/PERF.md`](docs/PERF.md)。
 
 N-D 扩展：搜索网格是各轴 marginal 的张量积——每轴 L 点即 (L−1)^k 格——

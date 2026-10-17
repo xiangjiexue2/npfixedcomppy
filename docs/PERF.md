@@ -1429,21 +1429,20 @@ cd tests
 "C:\Program Files\R\R-4.6.1\bin\Rscript.exe" bench_binned_r.R         :: R binned times
 ```
 
-Parity gates (all must report `TOTAL BAD: 0`):
+Self-contained test gates (all must report `TOTAL BAD: 0`) — R is no
+longer part of the stack, so the suite verifies properties of the fit
+itself rather than matching R-recorded values:
 
 ```bat
 cd npfixedcomppy
-for %A in (npnormll nptll cvmadcll pois density binned coveb posteriormean kernels 2d_same) do .venv\Scripts\python.exe tests\verify_%A.py
+.venv\Scripts\python.exe run_all_verify.py
 ```
 
-`tests/verify_kernels.py` carries the 30-case 1-D/2-D kernel gold set
-(`ref_new.txt` + the R-dumped inputs, recorded against live R 4.6.1);
-`tests/verify_2d_same.py` carries the `npnorm2Dll` gold set
-(`parity_2d.csv`, `grid_2d.csv`, the initial mix, and R's final points
-`r3_pts_2d.csv` / `r3_pr_2d.txt`, recorded by `C:\...\rebuild\verify2d.R`);
-`tests/verify_3d.py` carries the 3-D `npnormND` gold set
-(`parity_3d.csv`, the explicit 18³ grid) — structural +
-self-consistency, since there is no R reference for k = 3.
+`tests/verify_optimality.py` — the directional-derivative (KKT)
+certificate for every 1-D family; `tests/verify_recovery.py` — recovery
+of a known true mixture under NPMLE + NPMDE; `tests/verify_3d.py` — the
+3-D `npnormND` structural + self-consistency gate (`parity_3d.csv`);
+`tests/verify_coveb_loss.py` — the selectable `covestEB` loss criterion.
 
 2-D wall times: `.venv\Scripts\python.exe bench_2d.py` (Py) and
 `Rscript bench_2d_r.R` (R), both reading the shared `parity_2d.csv`.
@@ -1462,17 +1461,14 @@ wall 表）、`tests/bench_binned.py`（分箱 wall 表）、
 （含 `evals=`）。R 参考时间：`tests/bench_r.R` /
 `bench_binned_r.R`（Rscript）。
 
-parity 门（全部须 `TOTAL BAD: 0`，代码块见上）：
-`tests/verify_kernels.py` 携带 30 例 1-D/2-D 核金标集
-（`ref_new.txt` + R 导出输入，对照活体 R 4.6.1 记录）；
-`tests/verify_2d_same.py` 携带 `npnorm2Dll` 金标集（`parity_2d.csv`、
-`grid_2d.csv`、初始混合、R 最终点 `r3_pts_2d.csv` / `r3_pr_2d.txt`，
-由 `C:\...\rebuild\verify2d.R` 记录）；`tests/verify_3d.py` 携带 3-D
-`npnormND` 金标集（`parity_3d.csv`、显式 18³ 网格）——k = 3 无 R
-参考，故走结构 + 自洽门。2-D wall 时间：
-`.venv\Scripts\python.exe bench_2d.py`（Py）与
-`Rscript bench_2d_r.R`（R），共读 `parity_2d.csv`；§4a.2 快路径
-中位数来自 `tests/measure_2d.py`，运行加 `NPFIXEDCOMPY_PROFILE=1`
+自包含测试门（全部须 `TOTAL BAD: 0`，代码块见上）——R 已不在栈中，
+故套件验证拟合自身的性质，而非对拍 R 录制的值：
+`tests/verify_optimality.py`（全部一维族的方向导数 / KKT 证书）、
+`tests/verify_recovery.py`（NPMLE + NPMDE 下已知真混合的恢复）、
+`tests/verify_3d.py`（3-D `npnormND` 结构 + 自洽门，`parity_3d.csv`）、
+`tests/verify_coveb_loss.py`（`covestEB` 可选拟合判据）。2-D wall
+时间：`.venv\Scripts\python.exe bench_2d.py`（Py）；§4a.2 快路径中
+位数来自 `tests/measure_2d.py`，运行加 `NPFIXEDCOMPY_PROFILE=1`
 打印 `objevals` 行。
 
 ## 7. References
