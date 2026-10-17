@@ -1145,7 +1145,7 @@ PYBIND11_MODULE(_core, m) {
     m.doc() = "npfixedcomppy C++/Eigen core (pybind11)";
     // A callable, matching the PyO3 `version()` entry point the Python
     // front-end (npfc.py) expects.
-    m.def("version", [] { return std::string("0.3.1"); });
+    m.def("version", [] { return std::string("0.3.2"); });
 
     const auto guard = py::call_guard<py::gil_scoped_release>();
     const auto kw = py::kw_only();

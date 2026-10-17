@@ -159,6 +159,44 @@ GEMM/GEMV（不支持则为串行 Eigen）；对固定构建与线程数，相�
 分布能恢复真值；由 §5 的自包含门保证。构建内确定性不变：相同输入恒
 产生逐位相同的输出。细节与实测证据见 [`docs/PERF.md`](docs/PERF.md)。
 
+## 2. What's new in 0.3.2 (vs 0.3.1)
+
+**The R-parity test stack is removed and replaced by self-contained
+verification — no package-code or C++ changes.**
+
+* **Testing: R-parity removed, self-contained verification in its
+  place** — with R uninstalled, the R `npfixedcomp2` reference can no
+  longer be run, so the R-parity suites (which compared the C++ output
+  against pre-generated R reference data) are removed. In their place,
+  two new self-contained suites verify the optimiser on its own terms:
+  `tests/verify_optimality.py` checks the KKT directional-derivative
+  certificate for every 1-D family (NPMLE, NPMDE, and the binned
+  variants) — `min_gradient >= -tol` at the converged support — plus the
+  `ll == recompute` self-consistency invariant; and
+  `tests/verify_recovery.py` samples a fixed-seed 3-component normal
+  mixture, fits it with NPMLE and NPMDE, and asserts the induced
+  densities agree (max abs < 0.03, L1 < 0.05), the dominant component
+  sits near the true modes (< 0.45), and the KKT certificate holds.
+  The two pre-existing self-contained suites (`tests/verify_3d.py`
+  3-D structure + self-consistency, `tests/verify_coveb_loss.py` the
+  `covestEB` loss paths) are kept. `run_all_verify.py` now runs the
+  four self-contained suites (the ten R-parity suites are removed; the
+  two pre-existing self-contained suites are kept, and two new
+  self-contained suites are added).
+
+* **No package-code or C++ changes** — the C++/Eigen engine, the Python
+  front end, and the public API are byte-for-byte unchanged from 0.3.1;
+  this release is test-stack and documentation maintenance only.
+
+* **Docs** — README section 5 ("Testing") and `docs/PERF.md` now
+  describe the four self-contained suites; references to the removed
+  R-parity files are cleaned up (the quoted accuracy figures are
+  retained, the file paths dropped); `.gitignore` drops the now-dead
+  R-generator entries.
+
+Version sources bumped to `0.3.2` (`pyproject.toml` single source,
+`setup.py` mirrored; the compiled extension reports `0.3.2`).
+
 ## 2. What's new in 0.3.1 (vs 0.3.0)
 
 **`covestEB` gains a selectable mixing-fit loss criterion
@@ -362,6 +400,34 @@ N-D (`npnormND`) and removed the `NPFIC_2D_EXACT` objective path (see
 "What's new in 0.3.0" above). The "ten parity suites" count is the
 0.2.3 set — `tests/verify_3d.py` joined it in 0.3.0 (making eleven)
 and `tests/verify_coveb_loss.py` in 0.3.1, making twelve.*
+
+### 0.3.2 更新内容（相对 0.3.1）
+
+**移除 R-parity 测试栈，改为自包含验证——包代码与 C++ 无任何改动。**
+
+* **测试：移除 R-parity，改为自包含验证**——R 已卸载，R
+  `npfixedcomp2` 参考无法再运行，因此与预生成 R 参考数据对比的
+  R-parity 套件被移除。取而代之，两个新的自包含套件按优化器自身的
+  判据验证：`tests/verify_optimality.py` 对全部 1-D 族（NPMLE、
+  NPMDE 及分箱变体）检查 KKT 方向导数证书——收敛支撑点上
+  `min_gradient >= -tol`——外加 `ll == 重算` 自洽不变量；
+  `tests/verify_recovery.py` 采样一个固定种子的 3 分量正态混合，
+  用 NPMLE 与 NPMDE 拟合，断言诱导密度一致（max abs < 0.03、
+  L1 < 0.05）、主分量贴近真模态（< 0.45）、KKT 证书成立。保留
+  两个既有自包含套件（`tests/verify_3d.py` 3-D 结构 + 自洽、
+  `tests/verify_coveb_loss.py` `covestEB` loss 路径）。
+  `run_all_verify.py` 现在运行 4 个自包含套件（移除 10 个
+  R-parity 套件，保留 2 个既有自包含套件，新增 2 个自包含套件）。
+
+* **包代码与 C++ 无改动**——C++/Eigen 引擎、Python 前端与公开 API
+  与 0.3.1 逐字节一致；本版本仅为测试栈与文档维护。
+
+* **文档**——README 第 5 节（"Testing"）与 `docs/PERF.md` 现描述
+  4 个自包含套件；对已移除 R-parity 文件的引用已清理（引用的精度
+  数字保留，文件路径去掉）；`.gitignore` 去掉已失效的 R 生成器条目。
+
+版本源升到 `0.3.2`（`pyproject.toml` 为唯一源、`setup.py` 同步；
+编译扩展报告 `0.3.2`）。
 
 ### 0.3.1 更新内容（相对 0.3.0）
 
